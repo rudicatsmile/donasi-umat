@@ -13,25 +13,53 @@ import {
   AlertCircle,
   ShieldCheck,
   ExternalLink,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
-import { DUMMY_CAMPAIGNS } from "@/lib/dummy-data";
 import { formatRupiah, formatDateIndo } from "@/lib/utils";
 import { toast } from "sonner";
-import { approveCampaignAction, rejectCampaignAction } from "@/app/actions/campaigns";
+import {
+  approveCampaignAction,
+  rejectCampaignAction,
+  getCampaignDetailForAdminAction,
+} from "@/app/actions/campaigns";
 
 export default function AdminCampaignDetailPage() {
   const router = useRouter();
   const params = useParams();
   const id = params?.id as string;
-  const campaign = DUMMY_CAMPAIGNS.find((c) => c.id === id) || DUMMY_CAMPAIGNS[0];
 
+  const [campaign, setCampaign] = React.useState<any | null>(null);
+  const [isLoading, setIsLoading] = React.useState(true);
   const [adminNote, setAdminNote] = React.useState("");
+  const [isProcessing, setIsProcessing] = React.useState(false);
+
+  React.useEffect(() => {
+    async function loadCampaign() {
+      if (!id) return;
+      setIsLoading(true);
+      try {
+        const res = await getCampaignDetailForAdminAction(id);
+        if (res.success && res.data) {
+          setCampaign(res.data);
+        } else {
+          toast.error(res.error || "Kampanye tidak ditemukan");
+        }
+      } catch (err: any) {
+        toast.error(err.message || "Gagal memuat detail kampanye");
+      } finally {
+        setIsLoading(false);
+      }
+    }
+    loadCampaign();
+  }, [id]);
 
   const handleApprove = async () => {
+    if (!campaign) return;
+    setIsProcessing(true);
     try {
       const res = await approveCampaignAction(campaign.id);
       if (res.success) {
@@ -42,16 +70,20 @@ export default function AdminCampaignDetailPage() {
       }
     } catch (err: any) {
       toast.error(err.message || "Terjadi kesalahan sistem");
+    } finally {
+      setIsProcessing(false);
     }
   };
 
   const handleReject = async () => {
+    if (!campaign) return;
     if (!adminNote || adminNote.trim().length < 5) {
       toast.error("Harap tuliskan catatan alasan penolakan minimal 5 karakter!");
       return;
     }
+    setIsProcessing(true);
     try {
-      const res = await rejectCampaignAction(campaign.id, adminNote);
+      const res = await rejectCampaignAction(campaign.id, adminNote.trim());
       if (res.success) {
         toast.success(res.message);
         router.push("/admin/kampanye");
@@ -60,8 +92,38 @@ export default function AdminCampaignDetailPage() {
       }
     } catch (err: any) {
       toast.error(err.message || "Terjadi kesalahan sistem");
+    } finally {
+      setIsProcessing(false);
     }
   };
+
+  if (isLoading) {
+    return (
+      <div className="py-24 flex flex-col items-center justify-center gap-3 text-muted-foreground">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        <p className="text-xs font-medium">Memuat proposal kampanye dari Supabase...</p>
+      </div>
+    );
+  }
+
+  if (!campaign) {
+    return (
+      <div className="py-20 text-center space-y-4 max-w-md mx-auto">
+        <div className="h-12 w-12 rounded-full bg-red-100 text-red-600 flex items-center justify-center mx-auto">
+          <AlertCircle className="h-6 w-6" />
+        </div>
+        <h2 className="font-heading font-bold text-lg text-foreground">Kampanye Tidak Ditemukan</h2>
+        <p className="text-xs text-muted-foreground">
+          Kampanye dengan ID tersebut tidak ditemukan di database.
+        </p>
+        <Link href="/admin/kampanye">
+          <Button size="sm" variant="outline">
+            Kembali ke Daftar Kampanye
+          </Button>
+        </Link>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6 max-w-4xl mx-auto">
@@ -84,16 +146,18 @@ export default function AdminCampaignDetailPage() {
             </Badge>
           </div>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Dibuat oleh <strong>{campaign.fundraiser.fullName}</strong> pada {formatDateIndo(campaign.createdAt)}
+            Dibuat oleh <strong>{campaign.fundraiser?.fullName || "Inisiator"}</strong> pada {formatDateIndo(campaign.createdAt)}
           </p>
         </div>
 
-        <Link href={`/kampanye/${campaign.slug}`}>
-          <Button variant="outline" size="sm" className="gap-1.5 text-xs">
-            Pratinjau Halaman Publik
-            <ExternalLink className="h-3.5 w-3.5" />
-          </Button>
-        </Link>
+        {campaign.slug && (
+          <Link href={`/kampanye/${campaign.slug}`}>
+            <Button variant="outline" size="sm" className="gap-1.5 text-xs">
+              Pratinjau Halaman Publik
+              <ExternalLink className="h-3.5 w-3.5" />
+            </Button>
+          </Link>
+        )}
       </div>
 
       {/* Campaign Details Preview Card */}
@@ -110,7 +174,7 @@ export default function AdminCampaignDetailPage() {
         </div>
 
         <img
-          src={campaign.coverImageUrl}
+          src={campaign.coverImageUrl || "https://images.unsplash.com/photo-1532629345422-7515f3d16bb6?auto=format&fit=crop&q=80&w=800"}
           alt={campaign.title}
           className="aspect-video w-full rounded-2xl object-cover shadow-xs"
         />
@@ -173,18 +237,20 @@ export default function AdminCampaignDetailPage() {
             <Button
               type="button"
               variant="destructive"
+              disabled={isProcessing}
               onClick={handleReject}
               className="gap-1.5"
             >
-              <XCircle className="h-4 w-4" />
+              {isProcessing ? <Loader2 className="h-4 w-4 animate-spin" /> : <XCircle className="h-4 w-4" />}
               Tolak / Minta Revisi
             </Button>
             <Button
               type="button"
+              disabled={isProcessing}
               onClick={handleApprove}
               className="gap-1.5 font-bold"
             >
-              <CheckCircle2 className="h-4 w-4" />
+              {isProcessing ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
               Setujui & Publikasikan (Approve)
             </Button>
           </div>

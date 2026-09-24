@@ -11,33 +11,63 @@ import {
   AlertCircle,
   ShieldCheck,
   Send,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { DUMMY_CAMPAIGNS } from "@/lib/dummy-data";
 import { formatRupiah } from "@/lib/utils";
 import { toast } from "sonner";
-import { requestWithdrawalAction } from "@/app/actions/disbursement-and-updates";
+import {
+  requestWithdrawalAction,
+  getCampaignForWithdrawalAction,
+} from "@/app/actions/disbursement-and-updates";
 
 export default function RequestDisbursementPage() {
   const router = useRouter();
   const params = useParams();
   const id = params?.id as string;
-  const campaign = DUMMY_CAMPAIGNS.find((c) => c.id === id) || DUMMY_CAMPAIGNS[0];
 
-  const availableBalance = campaign.collectedAmount - 15000000; // contoh setelah dikurangi pencairan sebelumnya
+  const [campaignData, setCampaignData] = React.useState<any | null>(null);
+  const [isLoading, setIsLoading] = React.useState(true);
   const [requestedAmount, setRequestedAmount] = React.useState<string>("10000000");
   const [purpose, setPurpose] = React.useState("");
   const [isSubmitting, setIsSubmitting] = React.useState(false);
 
+  React.useEffect(() => {
+    async function loadCampaign() {
+      if (!id) return;
+      setIsLoading(true);
+      try {
+        const res = await getCampaignForWithdrawalAction(id);
+        if (res.success && res.data) {
+          setCampaignData(res.data);
+          // Set sensible initial amount
+          const initial = Math.min(10000000, res.data.availableBalance);
+          setRequestedAmount(initial > 0 ? initial.toString() : "0");
+        } else {
+          toast.error(res.error || "Kampanye tidak ditemukan");
+        }
+      } catch (err: any) {
+        toast.error(err.message || "Gagal memuat saldo kampanye");
+      } finally {
+        setIsLoading(false);
+      }
+    }
+    loadCampaign();
+  }, [id]);
+
+  const availableBalance = campaignData?.availableBalance || 0;
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!campaignData) return;
+
     const amountNum = Number(requestedAmount);
-    if (amountNum < 50000) {
-      toast.error("Nominal pencairan minimal Rp 50.000!");
+    if (amountNum < 100000) {
+      toast.error("Nominal pencairan minimal Rp 100.000!");
       return;
     }
     if (amountNum > availableBalance) {
@@ -52,12 +82,12 @@ export default function RequestDisbursementPage() {
     setIsSubmitting(true);
     try {
       const formData = new FormData();
-      formData.append("campaign_id", campaign.id);
+      formData.append("campaign_id", campaignData.id);
       formData.append("requested_amount", requestedAmount);
       formData.append("purpose_description", purpose);
       formData.append("bank_name", "Bank Syariah Indonesia (BSI)");
-      formData.append("bank_account_number", "7123456789");
-      formData.append("bank_account_holder", "Yayasan / Inisiator Berkah");
+      formData.append("bank_account_number", "7189012345");
+      formData.append("bank_account_holder", "Ahmad Syafii (Sahabat Insan)");
 
       const res = await requestWithdrawalAction(formData);
       if (res.success) {
@@ -72,6 +102,34 @@ export default function RequestDisbursementPage() {
       setIsSubmitting(false);
     }
   };
+
+  if (isLoading) {
+    return (
+      <div className="py-24 flex flex-col items-center justify-center gap-3 text-muted-foreground">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        <p className="text-xs font-medium">Memuat rincian saldo kampanye dari database...</p>
+      </div>
+    );
+  }
+
+  if (!campaignData) {
+    return (
+      <div className="py-20 text-center space-y-4 max-w-md mx-auto">
+        <div className="h-12 w-12 rounded-full bg-red-100 text-red-600 flex items-center justify-center mx-auto">
+          <AlertCircle className="h-6 w-6" />
+        </div>
+        <h2 className="font-heading font-bold text-lg text-foreground">Kampanye Tidak Ditemukan</h2>
+        <p className="text-xs text-muted-foreground">
+          Data kampanye tidak ditemukan di database.
+        </p>
+        <Link href="/galang-dana/kampanye-saya">
+          <Button size="sm" variant="outline">
+            Kembali ke Kampanye Saya
+          </Button>
+        </Link>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6 max-w-3xl mx-auto py-2">
@@ -88,7 +146,7 @@ export default function RequestDisbursementPage() {
           Pengajuan Pencairan Dana Donasi
         </h1>
         <p className="text-xs sm:text-sm text-muted-foreground mt-1">
-          Kampanye: <strong>{campaign.title}</strong>
+          Kampanye: <strong>{campaignData.title}</strong>
         </p>
       </div>
 
@@ -97,13 +155,13 @@ export default function RequestDisbursementPage() {
         <Card className="p-4 bg-slate-50">
           <span className="text-[11px] text-muted-foreground">Total Dana Terkumpul</span>
           <p className="font-heading font-black text-lg text-foreground tabular-nums">
-            {formatRupiah(campaign.collectedAmount)}
+            {formatRupiah(campaignData.collectedAmount)}
           </p>
         </Card>
         <Card className="p-4 bg-slate-50">
           <span className="text-[11px] text-muted-foreground">Telah Dicairkan Sebelumnya</span>
           <p className="font-heading font-black text-lg text-slate-600 tabular-nums">
-            {formatRupiah(15000000)}
+            {formatRupiah(campaignData.withdrawnAmount)}
           </p>
         </Card>
         <Card className="p-4 bg-emerald-50 border-emerald-200">
@@ -155,9 +213,9 @@ export default function RequestDisbursementPage() {
             <div className="p-4 rounded-xl border border-emerald-300 bg-emerald-50/70 text-xs space-y-1">
               <p className="font-bold text-emerald-950 flex items-center gap-1.5">
                 <Building className="h-4 w-4 text-emerald-600" />
-                Bank Mandiri — 1310019283746
+                Bank Syariah Indonesia (BSI) — 7189012345
               </p>
-              <p className="text-slate-600">a.n YAYASAN SAHABAT INSAN AMANAH</p>
+              <p className="text-slate-600">a.n AHMAD SYAFII (SAHABAT INSAN)</p>
               <Badge variant="success" className="text-[10px] mt-1">
                 Rekening Resmi Terdaftar
               </Badge>
@@ -168,9 +226,23 @@ export default function RequestDisbursementPage() {
             Admin akan mereview pengajuan pencairan dalam waktu 1x24 jam. Setelah disetujui, dana akan ditransfer langsung ke rekening Anda dan bukti transfer admin akan dilampirkan.
           </div>
 
-          <Button type="submit" size="lg" disabled={isSubmitting} className="w-full font-bold gap-2">
-            <Wallet className="h-4 w-4" />
-            {isSubmitting ? "Mengajukan Pencairan..." : "Kirim Pengajuan Pencairan Dana"}
+          <Button
+            type="submit"
+            size="lg"
+            disabled={isSubmitting || availableBalance < 100000}
+            className="w-full font-bold gap-2"
+          >
+            {isSubmitting ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Mengajukan Pencairan...
+              </>
+            ) : (
+              <>
+                <Wallet className="h-4 w-4" />
+                Kirim Pengajuan Pencairan Dana
+              </>
+            )}
           </Button>
         </form>
       </Card>

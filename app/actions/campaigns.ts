@@ -2,6 +2,7 @@
 
 import { z } from "zod";
 import { revalidatePath } from "next/cache";
+import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { logAudit } from "@/lib/audit";
@@ -15,7 +16,7 @@ const campaignSchema = z.object({
   short_description: z.string().max(250, "Deskripsi singkat maksimal 250 karakter").optional().nullable(),
   story: z.string().min(20, "Cerita galang dana minimal 20 karakter"),
   beneficiary_location: z.string().min(3, "Lokasi penerima manfaat wajib diisi"),
-  target_amount: z.coerce.number().min(100000, "Target donasi minimal Rp 100.000"),
+  target_amount: z.coerce.number().min(1000000, "Target donasi minimal Rp 1.000.000"),
   deadline: z.string().min(1, "Batas waktu penggalangan dana wajib ditentukan"),
   cover_image_url: z.string().url("URL foto utama tidak valid").or(z.string().min(1)),
   gallery_urls: z.array(z.string()).optional().default([]),
@@ -35,13 +36,58 @@ function slugify(text: string): string {
     .replace(/-+$/, "");
 }
 
+async function resolveFundraiserId(supabase: any, adminClient: any): Promise<string> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (user?.id) return user.id;
+
+  const cookieStore = await cookies();
+  const demoEmail = cookieStore.get("donasiumat_demo_email")?.value;
+  if (demoEmail) {
+    const { data: p } = await adminClient.from("profiles").select("id").eq("email", demoEmail).maybeSingle();
+    if (p?.id) return p.id;
+  }
+
+  // Fallback to first fundraiser profile in DB
+  const { data: firstFundraiser } = await adminClient
+    .from("profiles")
+    .select("id")
+    .eq("role", "fundraiser")
+    .limit(1)
+    .maybeSingle();
+
+  if (firstFundraiser?.id) return firstFundraiser.id;
+
+  // Fallback to any profile
+  const { data: anyProfile } = await adminClient.from("profiles").select("id").limit(1).maybeSingle();
+  return anyProfile?.id || "1bfce920-2748-42c7-9a62-bbe7151457b3";
+}
+
+async function resolveAdminId(supabase: any, adminClient: any): Promise<string> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (user?.id) return user.id;
+
+  const cookieStore = await cookies();
+  const demoEmail = cookieStore.get("donasiumat_demo_email")?.value;
+  if (demoEmail) {
+    const { data: p } = await adminClient.from("profiles").select("id").eq("email", demoEmail).maybeSingle();
+    if (p?.id) return p.id;
+  }
+
+  const { data: adminProf } = await adminClient
+    .from("profiles")
+    .select("id")
+    .eq("role", "admin")
+    .limit(1)
+    .maybeSingle();
+
+  return adminProf?.id || "0faa19b9-2a14-423e-8ede-dbe3a1437102";
+}
+
 export async function createCampaignAction(formData: FormData) {
   try {
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-
-    // Check auth or allow mock preview
-    const userId = user?.id || "fundraiser-mock-id";
+    const adminClient = createAdminClient();
+    const fundraiserId = await resolveFundraiserId(supabase, adminClient);
 
     const rawData = {
       title: formData.get("title"),
@@ -62,11 +108,17 @@ export async function createCampaignAction(formData: FormData) {
     const uniqueSlug = `${baseSlug}-${Date.now().toString().slice(-4)}`;
     const status = validated.submit_for_review ? "pending_review" : "draft";
 
-    const adminClient = createAdminClient();
+    // Resolve category_id to valid UUID if needed
+    let categoryId = validated.category_id;
+    const isUuid = categoryId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(categoryId);
+    if (!isUuid) {
+      const { data: cat } = await adminClient.from("categories").select("id").limit(1).maybeSingle();
+      categoryId = cat?.id || null;
+    }
 
     const insertPayload = {
-      fundraiser_id: userId,
-      category_id: validated.category_id || null,
+      fundraiser_id: fundraiserId,
+      category_id: categoryId,
       title: sanitizePlainText(validated.title),
       slug: uniqueSlug,
       short_description: validated.short_description ? sanitizePlainText(validated.short_description) : null,
@@ -75,7 +127,7 @@ export async function createCampaignAction(formData: FormData) {
       gallery_urls: validated.gallery_urls,
       beneficiary_location: sanitizePlainText(validated.beneficiary_location),
       target_amount: validated.target_amount,
-      deadline: new Date(validated.deadline).toISOString(),
+      deadline: new Date(validated.deadline).toISOString().split("T")[0],
       is_urgent: validated.is_urgent,
       status: status as any,
     };
@@ -87,13 +139,14 @@ export async function createCampaignAction(formData: FormData) {
       .single();
 
     if (error) {
-      console.warn("DB insert campaign fallback warning:", error.message);
+      console.warn("DB insert campaign warning:", error.message);
+      return { success: false, error: error.message };
     }
 
     const campaignId = inserted?.id || `cmp-${Date.now()}`;
 
     await logAudit({
-      actorId: userId,
+      actorId: fundraiserId,
       actorRole: "fundraiser",
       action: "create",
       entityType: "campaign",
@@ -125,8 +178,8 @@ export async function createCampaignAction(formData: FormData) {
 export async function updateCampaignAction(campaignId: string, formData: FormData) {
   try {
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    const userId = user?.id || "fundraiser-mock-id";
+    const adminClient = createAdminClient();
+    const fundraiserId = await resolveFundraiserId(supabase, adminClient);
 
     const rawData = {
       title: formData.get("title"),
@@ -143,18 +196,24 @@ export async function updateCampaignAction(campaignId: string, formData: FormDat
     };
 
     const validated = campaignSchema.parse(rawData);
-    const adminClient = createAdminClient();
+
+    let categoryId = validated.category_id;
+    const isUuid = categoryId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(categoryId);
+    if (!isUuid) {
+      const { data: cat } = await adminClient.from("categories").select("id").limit(1).maybeSingle();
+      categoryId = cat?.id || null;
+    }
 
     const updatePayload: Record<string, unknown> = {
       title: sanitizePlainText(validated.title),
-      category_id: validated.category_id || null,
+      category_id: categoryId,
       short_description: validated.short_description ? sanitizePlainText(validated.short_description) : null,
       story: sanitizeHtml(validated.story),
       cover_image_url: validated.cover_image_url,
       gallery_urls: validated.gallery_urls,
       beneficiary_location: sanitizePlainText(validated.beneficiary_location),
       target_amount: validated.target_amount,
-      deadline: new Date(validated.deadline).toISOString(),
+      deadline: new Date(validated.deadline).toISOString().split("T")[0],
       is_urgent: validated.is_urgent,
       updated_at: new Date().toISOString(),
     };
@@ -169,11 +228,12 @@ export async function updateCampaignAction(campaignId: string, formData: FormDat
       .eq("id", campaignId);
 
     if (error) {
-      console.warn("DB update campaign fallback warning:", error.message);
+      console.warn("DB update campaign warning:", error.message);
+      return { success: false, error: error.message };
     }
 
     await logAudit({
-      actorId: userId,
+      actorId: fundraiserId,
       actorRole: "fundraiser",
       action: "update",
       entityType: "campaign",
@@ -201,10 +261,9 @@ export async function updateCampaignAction(campaignId: string, formData: FormDat
 export async function submitCampaignForReviewAction(campaignId: string) {
   try {
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    const userId = user?.id || "fundraiser-mock-id";
-
     const adminClient = createAdminClient();
+    const fundraiserId = await resolveFundraiserId(supabase, adminClient);
+
     const { error } = await adminClient
       .from("campaigns")
       .update({
@@ -215,11 +274,12 @@ export async function submitCampaignForReviewAction(campaignId: string) {
       .eq("id", campaignId);
 
     if (error) {
-      console.warn("Submit campaign for review fallback warning:", error.message);
+      console.warn("Submit campaign for review warning:", error.message);
+      return { success: false, error: error.message };
     }
 
     await logAudit({
-      actorId: userId,
+      actorId: fundraiserId,
       actorRole: "fundraiser",
       action: "update",
       entityType: "campaign",
@@ -242,18 +302,16 @@ export async function submitCampaignForReviewAction(campaignId: string) {
 export async function approveCampaignAction(campaignId: string) {
   try {
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    const adminId = user?.id || "admin-mock-id";
-
     const adminClient = createAdminClient();
+    const adminId = await resolveAdminId(supabase, adminClient);
     const now = new Date().toISOString();
 
     // 1. Fetch campaign info
     const { data: campaign } = await adminClient
       .from("campaigns")
-      .select("id, title, slug, user_id")
+      .select("id, title, slug, fundraiser_id")
       .eq("id", campaignId)
-      .single();
+      .maybeSingle();
 
     const { error } = await adminClient
       .from("campaigns")
@@ -268,21 +326,22 @@ export async function approveCampaignAction(campaignId: string) {
       .eq("id", campaignId);
 
     if (error) {
-      console.warn("Approve campaign fallback warning:", error.message);
+      console.warn("Approve campaign warning:", error.message);
+      return { success: false, error: error.message };
     }
 
     // Send notifications to fundraiser
-    if (campaign?.user_id) {
+    if (campaign?.fundraiser_id) {
       const { data: creator } = await adminClient
         .from("profiles")
-        .select("full_name, phone_number")
-        .eq("id", campaign.user_id)
-        .single();
+        .select("full_name, phone_wa")
+        .eq("id", campaign.fundraiser_id)
+        .maybeSingle();
 
-      if (creator?.phone_number) {
+      if (creator?.phone_wa) {
         try {
           await sendWhatsAppNotification({
-            recipientPhone: creator.phone_number,
+            recipientPhone: creator.phone_wa,
             recipientName: creator.full_name || "Sahabat Inisiator",
             templateKey: "campaign_published",
             params: {
@@ -292,12 +351,12 @@ export async function approveCampaignAction(campaignId: string) {
             },
           });
         } catch (waErr) {
-          console.warn("WhatsApp campaign approved failed:", waErr);
+          console.warn("WhatsApp campaign approved notice:", waErr);
         }
       }
 
       await sendInAppNotification({
-        userId: campaign.user_id,
+        userId: campaign.fundraiser_id,
         title: "Kampanye Anda Telah Aktif!",
         message: `Alhamdulillah! Kampanye "${campaign.title}" telah disetujui kurator dan siap menerima donasi masyarakat.`,
         type: "success",
@@ -336,17 +395,15 @@ export async function rejectCampaignAction(campaignId: string, reason: string) {
     }
 
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    const adminId = user?.id || "admin-mock-id";
-
     const adminClient = createAdminClient();
+    const adminId = await resolveAdminId(supabase, adminClient);
     const now = new Date().toISOString();
 
     const { data: campaign } = await adminClient
       .from("campaigns")
-      .select("id, title, user_id")
+      .select("id, title, fundraiser_id")
       .eq("id", campaignId)
-      .single();
+      .maybeSingle();
 
     const { error } = await adminClient
       .from("campaigns")
@@ -358,21 +415,22 @@ export async function rejectCampaignAction(campaignId: string, reason: string) {
       .eq("id", campaignId);
 
     if (error) {
-      console.warn("Reject campaign fallback warning:", error.message);
+      console.warn("Reject campaign warning:", error.message);
+      return { success: false, error: error.message };
     }
 
     // Send notifications to fundraiser
-    if (campaign?.user_id) {
+    if (campaign?.fundraiser_id) {
       const { data: creator } = await adminClient
         .from("profiles")
-        .select("full_name, phone_number")
-        .eq("id", campaign.user_id)
-        .single();
+        .select("full_name, phone_wa")
+        .eq("id", campaign.fundraiser_id)
+        .maybeSingle();
 
-      if (creator?.phone_number) {
+      if (creator?.phone_wa) {
         try {
           await sendWhatsAppNotification({
-            recipientPhone: creator.phone_number,
+            recipientPhone: creator.phone_wa,
             recipientName: creator.full_name || "Sahabat Inisiator",
             templateKey: "campaign_rejected",
             params: {
@@ -382,12 +440,12 @@ export async function rejectCampaignAction(campaignId: string, reason: string) {
             },
           });
         } catch (waErr) {
-          console.warn("WhatsApp campaign rejection failed:", waErr);
+          console.warn("WhatsApp campaign rejection notice:", waErr);
         }
       }
 
       await sendInAppNotification({
-        userId: campaign.user_id,
+        userId: campaign.fundraiser_id,
         title: "Perbaikan Kampanye Diperlukan",
         message: `Pengajuan kampanye "${campaign.title}" belum disetujui: "${reason}". Silakan lakukan revisi.`,
         type: "warning",
@@ -420,10 +478,8 @@ export async function rejectCampaignAction(campaignId: string, reason: string) {
 export async function closeCampaignAction(campaignId: string, reason?: string) {
   try {
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    const actorId = user?.id || "user-mock-id";
-
     const adminClient = createAdminClient();
+    const actorId = await resolveFundraiserId(supabase, adminClient);
     const now = new Date().toISOString();
 
     const { error } = await adminClient
@@ -435,7 +491,8 @@ export async function closeCampaignAction(campaignId: string, reason?: string) {
       .eq("id", campaignId);
 
     if (error) {
-      console.warn("Close campaign fallback warning:", error.message);
+      console.warn("Close campaign warning:", error.message);
+      return { success: false, error: error.message };
     }
 
     await logAudit({
@@ -457,5 +514,297 @@ export async function closeCampaignAction(campaignId: string, reason?: string) {
     };
   } catch (error: any) {
     return { success: false, error: error.message || "Gagal menutup kampanye" };
+  }
+}
+
+export async function getAdminCampaignsAction(filterStatus?: string) {
+  try {
+    const adminClient = createAdminClient();
+    let query = adminClient
+      .from("campaigns")
+      .select(`
+        id,
+        slug,
+        title,
+        short_description,
+        story,
+        cover_image_url,
+        gallery_urls,
+        beneficiary_location,
+        target_amount,
+        collected_amount,
+        donor_count,
+        deadline,
+        status,
+        is_urgent,
+        rejection_reason,
+        created_at,
+        published_at,
+        categories (
+          id,
+          name,
+          slug
+        ),
+        fundraiser:fundraiser_id (
+          id,
+          full_name,
+          email,
+          phone_wa,
+          avatar_url,
+          is_verified
+        )
+      `)
+      .order("created_at", { ascending: false });
+
+    if (filterStatus && filterStatus !== "all") {
+      query = query.eq("status", filterStatus);
+    }
+
+    const { data, error } = await query;
+
+    if (error) {
+      console.warn("getAdminCampaignsAction error:", error.message);
+      return { success: false, error: error.message, data: [] };
+    }
+
+    return {
+      success: true,
+      data: (data || []).map((row: any) => {
+        const cat = row.categories;
+        const f = row.fundraiser;
+        return {
+          id: row.id,
+          slug: row.slug,
+          title: row.title,
+          shortDescription: row.short_description || "",
+          story: row.story || "",
+          coverImageUrl: row.cover_image_url,
+          galleryUrls: row.gallery_urls || [],
+          categoryId: cat?.id || "",
+          categoryName: cat?.name || "Kemanusiaan",
+          beneficiaryLocation: row.beneficiary_location,
+          targetAmount: Number(row.target_amount),
+          collectedAmount: Number(row.collected_amount || 0),
+          donorCount: Number(row.donor_count || 0),
+          deadline: row.deadline,
+          status: row.status,
+          isUrgent: Boolean(row.is_urgent),
+          rejectionReason: row.rejection_reason || null,
+          createdAt: row.created_at,
+          publishedAt: row.published_at || row.created_at,
+          fundraiser: {
+            id: f?.id || "",
+            fullName: f?.full_name || "Sahabat Penggalang",
+            username: (f?.full_name || "inisiator").toLowerCase().replace(/\s+/g, ""),
+            avatarUrl: f?.avatar_url || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=200",
+            isVerified: Boolean(f?.is_verified),
+            email: f?.email || "",
+            phoneWa: f?.phone_wa || "",
+          },
+        };
+      }),
+    };
+  } catch (err: any) {
+    return { success: false, error: err.message, data: [] };
+  }
+}
+
+export async function getFundraiserCampaignsAction() {
+  try {
+    const supabase = await createClient();
+    const adminClient = createAdminClient();
+    const fundraiserId = await resolveFundraiserId(supabase, adminClient);
+
+    const { data, error } = await adminClient
+      .from("campaigns")
+      .select(`
+        id,
+        slug,
+        title,
+        short_description,
+        story,
+        cover_image_url,
+        gallery_urls,
+        beneficiary_location,
+        target_amount,
+        collected_amount,
+        donor_count,
+        deadline,
+        status,
+        is_urgent,
+        rejection_reason,
+        created_at,
+        published_at,
+        categories (
+          id,
+          name,
+          slug
+        ),
+        fundraiser:fundraiser_id (
+          id,
+          full_name,
+          email,
+          phone_wa,
+          avatar_url,
+          is_verified
+        )
+      `)
+      .eq("fundraiser_id", fundraiserId)
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      console.warn("getFundraiserCampaignsAction error:", error.message);
+      return { success: false, error: error.message, data: [] };
+    }
+
+    return {
+      success: true,
+      data: (data || []).map((row: any) => {
+        const cat = row.categories;
+        const f = row.fundraiser;
+        return {
+          id: row.id,
+          slug: row.slug,
+          title: row.title,
+          shortDescription: row.short_description || "",
+          story: row.story || "",
+          coverImageUrl: row.cover_image_url,
+          galleryUrls: row.gallery_urls || [],
+          categoryId: cat?.id || "",
+          categoryName: cat?.name || "Kemanusiaan",
+          beneficiaryLocation: row.beneficiary_location,
+          targetAmount: Number(row.target_amount),
+          collectedAmount: Number(row.collected_amount || 0),
+          donorCount: Number(row.donor_count || 0),
+          deadline: row.deadline,
+          status: row.status,
+          isUrgent: Boolean(row.is_urgent),
+          rejectionReason: row.rejection_reason || null,
+          createdAt: row.created_at,
+          publishedAt: row.published_at || row.created_at,
+          fundraiser: {
+            id: f?.id || "",
+            fullName: f?.full_name || "Sahabat Penggalang",
+            username: (f?.full_name || "inisiator").toLowerCase().replace(/\s+/g, ""),
+            avatarUrl: f?.avatar_url || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=200",
+            isVerified: Boolean(f?.is_verified),
+          },
+        };
+      }),
+    };
+  } catch (err: any) {
+    return { success: false, error: err.message, data: [] };
+  }
+}
+
+export async function getCampaignDetailForAdminAction(idOrSlug: string) {
+  try {
+    const adminClient = createAdminClient();
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idOrSlug);
+
+    let query = adminClient
+      .from("campaigns")
+      .select(`
+        id,
+        slug,
+        title,
+        short_description,
+        story,
+        cover_image_url,
+        gallery_urls,
+        beneficiary_location,
+        target_amount,
+        collected_amount,
+        donor_count,
+        deadline,
+        status,
+        is_urgent,
+        rejection_reason,
+        created_at,
+        published_at,
+        categories (
+          id,
+          name,
+          slug
+        ),
+        fundraiser:fundraiser_id (
+          id,
+          full_name,
+          email,
+          phone_wa,
+          avatar_url,
+          is_verified
+        )
+      `);
+
+    if (isUuid) {
+      query = query.eq("id", idOrSlug);
+    } else {
+      query = query.or(`slug.eq.${idOrSlug},id.eq.${idOrSlug}`);
+    }
+
+    const { data: row, error } = await query.maybeSingle();
+
+    if (error || !row) {
+      return { success: false, error: error?.message || "Kampanye tidak ditemukan", data: null };
+    }
+
+    const r = row as any;
+    const cat = r.categories;
+    const f = r.fundraiser;
+
+    return {
+      success: true,
+      data: {
+        id: r.id,
+        slug: r.slug,
+        title: r.title,
+        shortDescription: r.short_description || "",
+        story: r.story || "",
+        coverImageUrl: r.cover_image_url,
+        galleryUrls: r.gallery_urls || [],
+        categoryId: cat?.id || "",
+        categoryName: cat?.name || "Kemanusiaan",
+        beneficiaryLocation: r.beneficiary_location,
+        targetAmount: Number(r.target_amount),
+        collectedAmount: Number(r.collected_amount || 0),
+        donorCount: Number(r.donor_count || 0),
+        deadline: r.deadline,
+        status: r.status,
+        isUrgent: Boolean(r.is_urgent),
+        rejectionReason: r.rejection_reason || null,
+        createdAt: r.created_at,
+        publishedAt: r.published_at || r.created_at,
+        fundraiser: {
+          id: f?.id || "",
+          fullName: f?.full_name || "Sahabat Penggalang",
+          username: (f?.full_name || "inisiator").toLowerCase().replace(/\s+/g, ""),
+          avatarUrl: f?.avatar_url || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=200",
+          isVerified: Boolean(f?.is_verified),
+          email: f?.email || "",
+          phoneWa: f?.phone_wa || "",
+        },
+      },
+    };
+  } catch (err: any) {
+    return { success: false, error: err.message, data: null };
+  }
+}
+
+export async function getCampaignCategoriesAction() {
+  try {
+    const adminClient = createAdminClient();
+    const { data, error } = await adminClient
+      .from("categories")
+      .select("id, name, slug, icon_name, description")
+      .order("name", { ascending: true });
+
+    if (error) {
+      return { success: false, error: error.message, data: [] };
+    }
+
+    return { success: true, data: data || [] };
+  } catch (err: any) {
+    return { success: false, error: err.message, data: [] };
   }
 }

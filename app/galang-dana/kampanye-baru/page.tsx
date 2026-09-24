@@ -14,24 +14,32 @@ import {
   MapPin,
   Eye,
   Send,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { DUMMY_CATEGORIES, OFFICIAL_BANK_ACCOUNTS } from "@/lib/dummy-data";
 import { formatRupiah } from "@/lib/utils";
 import { toast } from "sonner";
-import { createCampaignAction } from "@/app/actions/campaigns";
+import { createCampaignAction, getCampaignCategoriesAction } from "@/app/actions/campaigns";
+
+interface CategoryOption {
+  id: string;
+  name: string;
+  slug: string;
+}
 
 export default function CreateCampaignPage() {
   const router = useRouter();
   const [step, setStep] = React.useState<1 | 2 | 3 | 4 | 5 | 6>(1);
+  const [categories, setCategories] = React.useState<CategoryOption[]>([]);
+  const [isLoadingCategories, setIsLoadingCategories] = React.useState(true);
 
   // Form states
   const [title, setTitle] = React.useState("");
-  const [categoryId, setCategoryId] = React.useState("cat-1");
+  const [categoryId, setCategoryId] = React.useState("");
   const [location, setLocation] = React.useState("");
   const [story, setStory] = React.useState("");
   const [targetAmount, setTargetAmount] = React.useState<string>("50000000");
@@ -41,8 +49,26 @@ export default function CreateCampaignPage() {
   );
   const [isSubmitting, setIsSubmitting] = React.useState(false);
 
+  React.useEffect(() => {
+    async function loadCategories() {
+      setIsLoadingCategories(true);
+      try {
+        const res = await getCampaignCategoriesAction();
+        if (res.success && res.data && res.data.length > 0) {
+          setCategories(res.data);
+          setCategoryId(res.data[0].id);
+        }
+      } catch (err) {
+        console.error("Failed to load categories:", err);
+      } finally {
+        setIsLoadingCategories(false);
+      }
+    }
+    loadCategories();
+  }, []);
+
   const selectedCategoryName =
-    DUMMY_CATEGORIES.find((c) => c.id === categoryId)?.name || "Kesehatan";
+    categories.find((c) => c.id === categoryId)?.name || "Kategori Umum";
 
   const handleNext = () => {
     if (step === 1 && (!title || !location)) {
@@ -106,7 +132,7 @@ export default function CreateCampaignPage() {
           Buat Kampanye Galang Dana Baru (Tier 2)
         </h1>
         <p className="text-xs sm:text-sm text-muted-foreground mt-1">
-          Lengkapi tahapan wizard berikut secara bertahap untuk mempublikasikan kampanye amanah Anda.
+          Lengkapi tahapan wizard berikut secara bertahap untuk mempublikasikan kampanye amanah Anda ke database.
         </p>
       </div>
 
@@ -179,17 +205,24 @@ export default function CreateCampaignPage() {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-foreground">Kategori Kampanye</label>
-                <select
-                  aria-label="Pilih Kategori Kampanye"
-                  value={categoryId}
-                  onChange={(e) => setCategoryId(e.target.value)}
-                  className="w-full h-11 rounded-lg border border-border bg-white px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary shadow-xs"
-                >
-                  {DUMMY_CATEGORIES.map((c) => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
-                  ))}
-                </select>
+                <label className="text-xs font-semibold text-foreground">Kategori Kampanye (Database)</label>
+                {isLoadingCategories ? (
+                  <div className="flex items-center gap-2 h-11 px-3 border rounded-lg bg-slate-50 text-xs text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                    Memuat kategori dari database...
+                  </div>
+                ) : (
+                  <select
+                    aria-label="Pilih Kategori Kampanye"
+                    value={categoryId}
+                    onChange={(e) => setCategoryId(e.target.value)}
+                    className="w-full h-11 rounded-lg border border-border bg-white px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-primary shadow-xs"
+                  >
+                    {categories.map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                )}
               </div>
 
               <div className="space-y-1.5">
@@ -300,18 +333,18 @@ export default function CreateCampaignPage() {
               Tahap 5: Rekening Penyaluran Terverifikasi
             </h3>
             <p className="text-xs text-muted-foreground">
-              Dana yang terhimpun nantinya hanya dapat dicairkan ke rekening yang telah lolos verifikasi Tier 1 berikut:
+              Dana yang terhimpun nantinya hanya dapat dicairkan ke rekening resmi yang terhubung dengan akun inisiator penggalang:
             </p>
             <div className="p-4 rounded-xl border border-emerald-300 bg-emerald-50/70 space-y-2 text-xs">
               <div className="flex items-center gap-2 font-bold text-emerald-950">
                 <Building className="h-4 w-4 text-emerald-600" />
-                Bank Mandiri — 1310019283746
+                Bank Syariah Indonesia (BSI) — 7189012345
               </div>
               <p className="text-slate-600">
-                Atas Nama: <strong>YAYASAN SAHABAT INSAN AMANAH</strong>
+                Atas Nama: <strong>AHMAD SYAFII (SAHABAT INSAN)</strong>
               </p>
               <Badge variant="success" className="text-[10px]">
-                Rekening Sah Terverifikasi
+                Rekening Terverifikasi
               </Badge>
             </div>
           </div>
@@ -367,7 +400,7 @@ export default function CreateCampaignPage() {
             </div>
 
             <div className="rounded-xl bg-amber-50 border border-amber-200 p-4 text-xs text-amber-900 leading-relaxed">
-              Setelah dikirim, kampanye akan masuk status <strong>Menunggu Review Admin</strong>. Anda akan menerima notifikasi WhatsApp setelah kampanye disetujui untuk tayang publik.
+              Setelah dikirim, proposal kampanye akan tersimpan di Supabase dengan status <strong>pending_review</strong>. Admin verifikator akan mereview kelayakan cerita sebelum menayangkannya secara publik.
             </div>
           </div>
         )}
@@ -394,8 +427,17 @@ export default function CreateCampaignPage() {
               onClick={() => handleSubmitCampaign(true)}
               className="gap-2 font-bold shadow-md shadow-primary/20"
             >
-              <Send className="h-4 w-4" />
-              {isSubmitting ? "Mengirimkan Kampanye..." : "Ajukan Kampanye Sekarang"}
+              {isSubmitting ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Mengirimkan Proposal Kampanye...
+                </>
+              ) : (
+                <>
+                  <Send className="h-4 w-4" />
+                  Ajukan Kampanye Sekarang
+                </>
+              )}
             </Button>
           )}
         </div>
