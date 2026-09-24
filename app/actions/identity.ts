@@ -3,11 +3,13 @@
 import { z } from "zod";
 import { createHash } from "crypto";
 import { revalidatePath } from "next/cache";
+import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { logAudit } from "@/lib/audit";
 import { sendWhatsAppNotification } from "@/lib/notifications/whatsapp";
 import { sendInAppNotification } from "@/lib/notifications/in-app";
+import { IdentityVerification } from "@/lib/dummy-data";
 
 const identitySchema = z.object({
   id_type: z.enum(["ktp", "sim", "passport"]),
@@ -29,11 +31,186 @@ function maskIdNumber(idNumber: string): string {
   return `${start}${"*".repeat(maskedLength)}${end}`;
 }
 
+async function resolveUserId(supabase: any, adminClient: any): Promise<string> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (user?.id) return user.id;
+
+  const cookieStore = await cookies();
+  const demoEmail = cookieStore.get("donasiumat_demo_email")?.value;
+  if (demoEmail) {
+    const { data: p } = await adminClient.from("profiles").select("id").eq("email", demoEmail).maybeSingle();
+    if (p?.id) return p.id;
+  }
+
+  // Fallback to fundraiser applicant or donor
+  const { data: donor } = await adminClient.from("profiles").select("id").eq("role", "donor").limit(1).maybeSingle();
+  if (donor?.id) return donor.id;
+
+  const { data: anyUser } = await adminClient.from("profiles").select("id").limit(1).maybeSingle();
+  return anyUser?.id || "da95d08f-872f-4280-8f69-c86a1d589c51";
+}
+
+async function resolveAdminId(supabase: any, adminClient: any): Promise<string> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (user?.id) return user.id;
+
+  const cookieStore = await cookies();
+  const demoEmail = cookieStore.get("donasiumat_demo_email")?.value;
+  if (demoEmail) {
+    const { data: p } = await adminClient.from("profiles").select("id").eq("email", demoEmail).maybeSingle();
+    if (p?.id) return p.id;
+  }
+
+  const { data: adminUser } = await adminClient.from("profiles").select("id").eq("role", "admin").limit(1).maybeSingle();
+  return adminUser?.id || "0faa19b9-2a14-423e-8ede-dbe3a1437102";
+}
+
+export async function getAdminIdentityVerificationsAction(): Promise<{
+  success: boolean;
+  data: IdentityVerification[];
+  error?: string;
+}> {
+  try {
+    const adminClient = createAdminClient();
+    const { data, error } = await adminClient
+      .from("identity_verifications")
+      .select(`
+        id,
+        user_id,
+        id_type,
+        id_number_masked,
+        full_name_on_id,
+        address,
+        bank_name,
+        bank_account_number,
+        bank_account_holder,
+        id_photo_url,
+        selfie_photo_url,
+        status,
+        rejection_reason,
+        reviewed_by,
+        reviewed_at,
+        created_at,
+        profiles:user_id ( full_name, email, phone_wa )
+      `)
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      console.error("Error fetching identity verifications:", error);
+      return { success: false, data: [], error: error.message };
+    }
+
+    const formatted: IdentityVerification[] = (data || []).map((row: any) => ({
+      id: row.id,
+      userId: row.user_id,
+      userName: row.profiles?.full_name || row.full_name_on_id || "Pengguna",
+      userEmail: row.profiles?.email || "-",
+      userPhone: row.profiles?.phone_wa || "-",
+      idType: row.id_type,
+      idNumberMasked: row.id_number_masked,
+      fullNameOnId: row.full_name_on_id,
+      address: row.address,
+      bankName: row.bank_name,
+      bankAccountNumber: row.bank_account_number,
+      bankAccountHolder: row.bank_account_holder,
+      idPhotoUrl: row.id_photo_url,
+      selfiePhotoUrl: row.selfie_photo_url,
+      status: row.status,
+      rejectionReason: row.rejection_reason || undefined,
+      reviewedBy: row.reviewed_by ? "Administrator" : undefined,
+      reviewedAt: row.reviewed_at || undefined,
+      createdAt: row.created_at,
+    }));
+
+    return { success: true, data: formatted };
+  } catch (err: any) {
+    return { success: false, data: [], error: err.message || "Gagal memuat data verifikasi" };
+  }
+}
+
+export async function getUserIdentityVerificationAction(): Promise<{
+  success: boolean;
+  verification: any | null;
+  profile: any | null;
+  error?: string;
+}> {
+  try {
+    const supabase = await createClient();
+    const adminClient = createAdminClient();
+    const userId = await resolveUserId(supabase, adminClient);
+
+    const { data: profile } = await adminClient
+      .from("profiles")
+      .select("id, full_name, email, phone_wa, role, is_verified")
+      .eq("id", userId)
+      .maybeSingle();
+
+    const { data: verification } = await adminClient
+      .from("identity_verifications")
+      .select("*")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    return {
+      success: true,
+      verification,
+      profile,
+    };
+  } catch (err: any) {
+    return { success: false, verification: null, profile: null, error: err.message };
+  }
+}
+
 export async function submitIdentityVerificationAction(formData: FormData) {
   try {
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    const userId = user?.id || "user-mock-id";
+    const adminClient = createAdminClient();
+    const userId = await resolveUserId(supabase, adminClient);
+
+    let idPhotoUrl = formData.get("id_photo_url") as string;
+    let selfiePhotoUrl = formData.get("selfie_photo_url") as string;
+
+    // Handle potential file uploads
+    const idFile = formData.get("id_photo_file") as File | null;
+    const selfieFile = formData.get("selfie_photo_file") as File | null;
+
+    if (idFile && typeof idFile === "object" && idFile.size > 0) {
+      try {
+        const ext = idFile.name.split(".").pop() || "jpg";
+        const path = `${userId}/id-${Date.now()}.${ext}`;
+        const buffer = Buffer.from(await idFile.arrayBuffer());
+        const { error: upErr } = await adminClient.storage
+          .from("verification-docs")
+          .upload(path, buffer, { contentType: idFile.type || "image/jpeg", upsert: true });
+
+        if (!upErr) {
+          const { data: urlData } = adminClient.storage.from("verification-docs").getPublicUrl(path);
+          idPhotoUrl = urlData.publicUrl;
+        }
+      } catch (uploadErr) {
+        console.warn("Storage upload error for ID document:", uploadErr);
+      }
+    }
+
+    if (selfieFile && typeof selfieFile === "object" && selfieFile.size > 0) {
+      try {
+        const ext = selfieFile.name.split(".").pop() || "jpg";
+        const path = `${userId}/selfie-${Date.now()}.${ext}`;
+        const buffer = Buffer.from(await selfieFile.arrayBuffer());
+        const { error: upErr } = await adminClient.storage
+          .from("verification-docs")
+          .upload(path, buffer, { contentType: selfieFile.type || "image/jpeg", upsert: true });
+
+        if (!upErr) {
+          const { data: urlData } = adminClient.storage.from("verification-docs").getPublicUrl(path);
+          selfiePhotoUrl = urlData.publicUrl;
+        }
+      } catch (uploadErr) {
+        console.warn("Storage upload error for Selfie document:", uploadErr);
+      }
+    }
 
     const rawData = {
       id_type: formData.get("id_type"),
@@ -43,8 +220,8 @@ export async function submitIdentityVerificationAction(formData: FormData) {
       bank_name: formData.get("bank_name"),
       bank_account_number: formData.get("bank_account_number"),
       bank_account_holder: formData.get("bank_account_holder"),
-      id_photo_url: formData.get("id_photo_url") || "https://images.unsplash.com/photo-1544717305-2782549b5136?auto=format&fit=crop&q=80&w=800",
-      selfie_photo_url: formData.get("selfie_photo_url") || "https://images.unsplash.com/photo-1544717305-2782549b5136?auto=format&fit=crop&q=80&w=800",
+      id_photo_url: idPhotoUrl || "https://images.unsplash.com/photo-1544717305-2782549b5136?auto=format&fit=crop&q=80&w=800",
+      selfie_photo_url: selfiePhotoUrl || "https://images.unsplash.com/photo-1544717305-2782549b5136?auto=format&fit=crop&q=80&w=800",
     };
 
     const validated = identitySchema.parse(rawData);
@@ -52,8 +229,6 @@ export async function submitIdentityVerificationAction(formData: FormData) {
     // Hash ID number to protect PII while preventing duplicate registrations
     const idHash = createHash("sha256").update(validated.id_number.trim()).digest("hex");
     const idMasked = maskIdNumber(validated.id_number.trim());
-
-    const adminClient = createAdminClient();
 
     // Check if ID hash already verified by another user
     const { data: existingVerified } = await adminClient
@@ -63,7 +238,7 @@ export async function submitIdentityVerificationAction(formData: FormData) {
       .eq("status", "verified")
       .neq("user_id", userId)
       .limit(1)
-      .single();
+      .maybeSingle();
 
     if (existingVerified) {
       return {
@@ -95,18 +270,29 @@ export async function submitIdentityVerificationAction(formData: FormData) {
       .single();
 
     if (error) {
-      console.warn("Identity verification insert fallback notice:", error.message);
+      console.warn("Identity verification insert notice:", error.message);
+      return { success: false, error: error.message };
     }
 
-    const verificationId = inserted?.id || `kyc-${Date.now()}`;
+    const verificationId = inserted?.id;
 
-    await logAudit({
-      actorId: userId,
-      actorRole: "donor",
-      action: "create",
-      entityType: "identity",
-      entityId: verificationId,
-      description: `Mengajukan verifikasi identitas KYC (${validated.id_type.toUpperCase()} - ${idMasked})`,
+    if (verificationId) {
+      await logAudit({
+        actorId: userId,
+        actorRole: "donor",
+        action: "create",
+        entityType: "identity",
+        entityId: verificationId,
+        description: `Mengajukan verifikasi identitas KYC (${validated.id_type.toUpperCase()} - ${idMasked})`,
+      });
+    }
+
+    await sendInAppNotification({
+      userId,
+      title: "Pengajuan Verifikasi Identitas Diterima",
+      message: "Data identitas (KYC) Anda sedang dalam antrean verifikasi oleh tim kurator DonasiUmat (1x24 jam kerja).",
+      type: "info",
+      linkUrl: "/galang-dana/verifikasi-identitas",
     });
 
     revalidatePath("/galang-dana/verifikasi-identitas");
@@ -129,10 +315,8 @@ export async function submitIdentityVerificationAction(formData: FormData) {
 export async function approveIdentityAction(verificationId: string, targetUserId: string) {
   try {
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    const adminId = user?.id || "admin-mock-id";
-
     const adminClient = createAdminClient();
+    const adminId = await resolveAdminId(supabase, adminClient);
     const now = new Date().toISOString();
 
     // 1. Update verification record
@@ -147,7 +331,8 @@ export async function approveIdentityAction(verificationId: string, targetUserId
       .eq("id", verificationId);
 
     if (vError) {
-      console.warn("Approve KYC verification fallback notice:", vError.message);
+      console.warn("Approve KYC verification notice:", vError.message);
+      return { success: false, error: vError.message };
     }
 
     // 2. Update user profile to verified & fundraiser role
@@ -161,20 +346,20 @@ export async function approveIdentityAction(verificationId: string, targetUserId
       .eq("id", targetUserId);
 
     if (pError) {
-      console.warn("Update profile verified fallback notice:", pError.message);
+      console.warn("Update profile verified notice:", pError.message);
     }
 
     // 3. Send notifications to user
     const { data: targetProfile } = await adminClient
       .from("profiles")
-      .select("full_name, phone_number")
+      .select("full_name, phone_wa")
       .eq("id", targetUserId)
-      .single();
+      .maybeSingle();
 
-    if (targetProfile?.phone_number) {
+    if (targetProfile?.phone_wa) {
       try {
         await sendWhatsAppNotification({
-          recipientPhone: targetProfile.phone_number,
+          recipientPhone: targetProfile.phone_wa,
           recipientName: targetProfile.full_name || "Sahabat",
           templateKey: "identity_approved",
           params: {
@@ -200,7 +385,7 @@ export async function approveIdentityAction(verificationId: string, targetUserId
       action: "approve",
       entityType: "identity",
       entityId: verificationId,
-      description: `Menyetujui verifikasi identitas KYC pengguna ${targetUserId}`,
+      description: `Menyetujui verifikasi identitas KYC pengguna ${targetProfile?.full_name || targetUserId}`,
     });
 
     revalidatePath("/admin/verifikasi-identitas");
@@ -223,10 +408,8 @@ export async function rejectIdentityAction(verificationId: string, targetUserId:
     }
 
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    const adminId = user?.id || "admin-mock-id";
-
     const adminClient = createAdminClient();
+    const adminId = await resolveAdminId(supabase, adminClient);
     const now = new Date().toISOString();
 
     const { error } = await adminClient
@@ -240,20 +423,21 @@ export async function rejectIdentityAction(verificationId: string, targetUserId:
       .eq("id", verificationId);
 
     if (error) {
-      console.warn("Reject KYC verification fallback notice:", error.message);
+      console.warn("Reject KYC verification notice:", error.message);
+      return { success: false, error: error.message };
     }
 
     // Send notifications to user
     const { data: targetProfile } = await adminClient
       .from("profiles")
-      .select("full_name, phone_number")
+      .select("full_name, phone_wa")
       .eq("id", targetUserId)
-      .single();
+      .maybeSingle();
 
-    if (targetProfile?.phone_number) {
+    if (targetProfile?.phone_wa) {
       try {
         await sendWhatsAppNotification({
-          recipientPhone: targetProfile.phone_number,
+          recipientPhone: targetProfile.phone_wa,
           recipientName: targetProfile.full_name || "Sahabat",
           templateKey: "identity_rejected",
           params: {
@@ -280,7 +464,7 @@ export async function rejectIdentityAction(verificationId: string, targetUserId:
       action: "reject",
       entityType: "identity",
       entityId: verificationId,
-      description: `Menolak verifikasi identitas KYC ${verificationId} untuk pengguna ${targetUserId}: ${reason}`,
+      description: `Menolak verifikasi identitas KYC pengguna ${targetProfile?.full_name || targetUserId}: ${reason}`,
     });
 
     revalidatePath("/admin/verifikasi-identitas");

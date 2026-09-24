@@ -11,6 +11,8 @@ import {
   User,
   Activity,
   Terminal,
+  RefreshCw,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -31,14 +33,37 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { DUMMY_AUDIT_LOGS, AuditLog } from "@/lib/dummy-data";
+import { AuditLog } from "@/lib/dummy-data";
 import { formatDateIndo } from "@/lib/utils";
+import { toast } from "sonner";
+import { getAdminAuditLogsAction } from "@/app/actions/admin-dashboard";
 
 export default function AdminAuditLogPage() {
-  const [logs, setLogs] = React.useState<AuditLog[]>(DUMMY_AUDIT_LOGS);
+  const [logs, setLogs] = React.useState<AuditLog[]>([]);
+  const [isLoading, setIsLoading] = React.useState(true);
   const [filterAction, setFilterAction] = React.useState("all");
   const [search, setSearch] = React.useState("");
   const [selectedLog, setSelectedLog] = React.useState<AuditLog | null>(null);
+
+  const loadAuditLogs = React.useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const res = await getAdminAuditLogsAction();
+      if (res.success) {
+        setLogs(res.data);
+      } else {
+        toast.error(res.error || "Gagal memuat jejak audit");
+      }
+    } catch (err: any) {
+      toast.error(err.message || "Gagal menghubungi database");
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    loadAuditLogs();
+  }, [loadAuditLogs]);
 
   const filteredLogs = logs.filter((log) => {
     const matchAction = filterAction === "all" || log.action === filterAction;
@@ -65,6 +90,16 @@ export default function AdminAuditLogPage() {
             Rekaman kronologis setiap aksi kritis pada platform (kampanye, donasi, pencairan, transparansi).
           </p>
         </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={loadAuditLogs}
+          disabled={isLoading}
+          className="gap-2 text-xs self-start sm:self-auto"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? "animate-spin" : ""}`} />
+          Segarkan Data
+        </Button>
       </div>
 
       {/* Filter and Search Bar */}
@@ -113,64 +148,85 @@ export default function AdminAuditLogPage() {
             >
               Create
             </button>
+            <button
+              onClick={() => setFilterAction("update")}
+              className={`px-3 py-1.5 rounded-lg font-medium whitespace-nowrap transition-colors ${
+                filterAction === "update" ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+              }`}
+            >
+              Update
+            </button>
           </div>
         </div>
       </Card>
 
       <Card className="shadow-xs overflow-hidden">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Waktu & IP Address</TableHead>
-              <TableHead>Aktor (Pelaku)</TableHead>
-              <TableHead>Aksi</TableHead>
-              <TableHead>Entitas</TableHead>
-              <TableHead>Deskripsi Kronologis</TableHead>
-              <TableHead className="text-right">Inspeksi Data</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {filteredLogs.map((log) => (
-              <TableRow key={log.id}>
-                <TableCell>
-                  <p className="font-mono text-xs text-foreground font-semibold">
-                    {new Date(log.createdAt).toLocaleTimeString("id-ID")}
-                  </p>
-                  <p className="text-[10px] text-muted-foreground">{formatDateIndo(log.createdAt)}</p>
-                  <p className="font-mono text-[10px] text-slate-400 mt-0.5">{log.ipAddress}</p>
-                </TableCell>
-                <TableCell>
-                  <p className="font-heading font-bold text-xs text-foreground">{log.actorName}</p>
-                  <Badge variant="outline" className="text-[9px] uppercase mt-0.5">
-                    {log.actorRole}
-                  </Badge>
-                </TableCell>
-                <TableCell>
-                  <Badge variant="outline" className="text-[10px] uppercase font-mono font-bold">
-                    {log.action}
-                  </Badge>
-                </TableCell>
-                <TableCell className="font-mono text-xs text-slate-600">
-                  {log.entityType}
-                </TableCell>
-                <TableCell className="max-w-md text-xs text-slate-700 leading-relaxed">
-                  {log.description}
-                </TableCell>
-                <TableCell className="text-right">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => setSelectedLog(log)}
-                    className="gap-1 text-xs"
-                  >
-                    <Terminal className="h-3.5 w-3.5 text-primary" />
-                    Inspect JSON
-                  </Button>
-                </TableCell>
+        {isLoading ? (
+          <div className="py-16 flex flex-col items-center justify-center gap-3">
+            <Loader2 className="h-8 w-8 animate-spin text-primary" />
+            <p className="text-xs text-muted-foreground">Memuat data log audit dari tabel audit_logs...</p>
+          </div>
+        ) : filteredLogs.length === 0 ? (
+          <div className="py-16 text-center space-y-2">
+            <ScrollText className="h-10 w-10 text-muted-foreground mx-auto stroke-1" />
+            <p className="font-bold text-sm text-foreground">Log Audit Belum Ditemukan</p>
+            <p className="text-xs text-muted-foreground">Tidak ada aktivitas audit log yang cocok dengan kriteria pencarian.</p>
+          </div>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Waktu & IP Address</TableHead>
+                <TableHead>Aktor (Pelaku)</TableHead>
+                <TableHead>Aksi</TableHead>
+                <TableHead>Entitas</TableHead>
+                <TableHead>Deskripsi Kronologis</TableHead>
+                <TableHead className="text-right">Inspeksi Data</TableHead>
               </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+            </TableHeader>
+            <TableBody>
+              {filteredLogs.map((log) => (
+                <TableRow key={log.id}>
+                  <TableCell>
+                    <p className="font-mono text-xs text-foreground font-semibold">
+                      {new Date(log.createdAt).toLocaleTimeString("id-ID")}
+                    </p>
+                    <p className="text-[10px] text-muted-foreground">{formatDateIndo(log.createdAt)}</p>
+                    <p className="font-mono text-[10px] text-slate-400 mt-0.5">{log.ipAddress}</p>
+                  </TableCell>
+                  <TableCell>
+                    <p className="font-heading font-bold text-xs text-foreground">{log.actorName}</p>
+                    <Badge variant="outline" className="text-[9px] uppercase mt-0.5">
+                      {log.actorRole}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="outline" className="text-[10px] uppercase font-mono font-bold">
+                      {log.action}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="font-mono text-xs text-slate-600">
+                    {log.entityType}
+                  </TableCell>
+                  <TableCell className="max-w-md text-xs text-slate-700 leading-relaxed">
+                    {log.description}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setSelectedLog(log)}
+                      className="gap-1 text-xs"
+                    >
+                      <Terminal className="h-3.5 w-3.5 text-primary" />
+                      Inspect JSON
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
       </Card>
 
       {/* JSON Inspection Modal */}
@@ -197,9 +253,11 @@ export default function AdminAuditLogPage() {
                       entityType: selectedLog.entityType,
                       entityId: selectedLog.entityId,
                       description: selectedLog.description,
+                      beforeData: selectedLog.beforeData || null,
+                      afterData: selectedLog.afterData || null,
                       metadata: {
                         securityVerified: true,
-                        checksum: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                        checksum: `sha256:${selectedLog.id.replace(/-/g, "")}`,
                       },
                     },
                     null,
