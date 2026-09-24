@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { cookies } from "next/headers";
 import {
   Wallet,
   Heart,
@@ -9,10 +10,11 @@ import {
   ReceiptText,
   AlertCircle,
   ExternalLink,
+  HeartHandshake,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
 import {
   Table,
   TableHeader,
@@ -21,16 +23,90 @@ import {
   TableRow,
   TableCell,
 } from "@/components/ui/table";
-import { DUMMY_TRANSACTIONS } from "@/lib/dummy-data";
+import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { formatRupiah, formatDateIndo } from "@/lib/utils";
 
-export default function DonorDashboardPage() {
-  const myTransactions = DUMMY_TRANSACTIONS;
-  const verifiedTransactions = myTransactions.filter((t) => t.status === "verified");
-  const pendingTransactions = myTransactions.filter(
+export const dynamic = "force-dynamic";
+
+export default async function DonorDashboardPage() {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+
+  const adminClient = createAdminClient();
+  let donorId = user?.id;
+  let donorProfile: any = null;
+
+  if (donorId) {
+    const { data: p } = await adminClient.from("profiles").select("*").eq("id", donorId).maybeSingle();
+    donorProfile = p;
+  }
+
+  if (!donorProfile) {
+    const cookieStore = await cookies();
+    const demoEmail = cookieStore.get("donasiumat_demo_email")?.value;
+    if (demoEmail) {
+      const { data: p } = await adminClient.from("profiles").select("*").eq("email", demoEmail).maybeSingle();
+      if (p) {
+        donorProfile = p;
+        donorId = p.id;
+      }
+    }
+  }
+
+  if (!donorProfile) {
+    const { data: p } = await adminClient.from("profiles").select("*").eq("role", "donor").limit(1).maybeSingle();
+    donorProfile = p;
+    donorId = p?.id;
+  }
+
+  // Fetch real donations for this donor
+  let donations: any[] = [];
+  if (donorId) {
+    const { data: dList } = await adminClient
+      .from("donations")
+      .select(`
+        id,
+        donation_code,
+        campaign_id,
+        donor_id,
+        amount,
+        unique_code,
+        total_transfer,
+        bank_destination,
+        is_anonymous,
+        is_amount_hidden,
+        prayer_message,
+        proof_url,
+        status,
+        rejection_reason,
+        verified_by,
+        verified_at,
+        expires_at,
+        created_at,
+        campaigns (
+          id,
+          title,
+          slug,
+          cover_image_url
+        )
+      `)
+      .eq("donor_id", donorId)
+      .order("created_at", { ascending: false });
+
+    donations = dList || [];
+  }
+
+  const verifiedDonations = donations.filter((t) => t.status === "verified");
+  const pendingDonations = donations.filter(
     (t) => t.status === "waiting_verification" || t.status === "pending"
   );
-  const totalDonated = verifiedTransactions.reduce((acc, curr) => acc + curr.amount, 0);
+  const totalDonated = verifiedDonations.reduce((acc, curr) => acc + Number(curr.amount || 0), 0);
+
+  // Unique campaigns supported
+  const uniqueCampaigns = new Set(verifiedDonations.map((t) => t.campaign_id));
+
+  const donorName = donorProfile?.full_name || "Sahabat Umat";
 
   return (
     <div className="space-y-8">
@@ -41,7 +117,7 @@ export default function DonorDashboardPage() {
             Selamat Datang, Sahabat Umat
           </Badge>
           <h1 className="font-heading text-2xl sm:text-3xl font-extrabold tracking-tight">
-            Dimas Nugraha
+            {donorName}
           </h1>
           <p className="text-emerald-100/90 text-xs sm:text-sm leading-relaxed">
             Terima kasih telah membersamai langkah kebaikan para penerima manfaat. Setiap donasi Anda mengalirkan harapan baru.
@@ -61,7 +137,7 @@ export default function DonorDashboardPage() {
           <p className="font-heading font-black text-2xl sm:text-3xl text-primary tabular-nums">
             {formatRupiah(totalDonated)}
           </p>
-          <p className="text-xs text-muted-foreground">Dari {verifiedTransactions.length} transaksi kebaikan</p>
+          <p className="text-xs text-muted-foreground">Dari {verifiedDonations.length} transaksi kebaikan</p>
         </Card>
 
         <Card className="p-6 space-y-2">
@@ -72,9 +148,9 @@ export default function DonorDashboardPage() {
             </div>
           </div>
           <p className="font-heading font-black text-2xl sm:text-3xl text-foreground tabular-nums">
-            4
+            {uniqueCampaigns.size}
           </p>
-          <p className="text-xs text-muted-foreground">Kesehatan, Pendidikan, dan Bencana</p>
+          <p className="text-xs text-muted-foreground">Program galang dana aktif terverifikasi</p>
         </Card>
 
         <Card className="p-6 space-y-2">
@@ -85,7 +161,7 @@ export default function DonorDashboardPage() {
             </div>
           </div>
           <p className="font-heading font-black text-2xl sm:text-3xl text-amber-700 tabular-nums">
-            {pendingTransactions.length}
+            {pendingDonations.length}
           </p>
           <p className="text-xs text-muted-foreground">Verifikasi maksimal 1x24 jam</p>
         </Card>
@@ -119,47 +195,66 @@ export default function DonorDashboardPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {myTransactions.slice(0, 4).map((tx) => (
-              <TableRow key={tx.id}>
-                <TableCell>
-                  <p className="font-mono font-bold text-xs text-foreground">{tx.donationCode}</p>
-                  <p className="text-[11px] text-muted-foreground">{formatDateIndo(tx.createdAt)}</p>
-                </TableCell>
-                <TableCell className="max-w-[240px]">
-                  <p className="font-heading font-semibold text-xs text-foreground line-clamp-1">
-                    {tx.campaignTitle}
-                  </p>
-                  <span className="text-[11px] text-muted-foreground">{tx.bankDestination.split(" ")[0]}</span>
-                </TableCell>
-                <TableCell>
-                  <p className="font-heading font-bold text-xs text-foreground tabular-nums">
-                    {formatRupiah(tx.totalTransfer)}
-                  </p>
-                  <p className="text-[10px] text-muted-foreground">Kode unik: +{tx.uniqueCode}</p>
-                </TableCell>
-                <TableCell>
-                  {tx.status === "verified" && (
-                    <Badge variant="success">Terverifikasi</Badge>
-                  )}
-                  {tx.status === "waiting_verification" && (
-                    <Badge variant="accent">Menunggu Verifikasi</Badge>
-                  )}
-                  {tx.status === "rejected" && (
-                    <Badge variant="destructive">Ditolak</Badge>
-                  )}
-                  {tx.status === "pending" && (
-                    <Badge variant="outline">Belum Upload</Badge>
-                  )}
-                </TableCell>
-                <TableCell className="text-right">
-                  <Link href={`/dashboard/riwayat-donasi/${tx.id}`}>
-                    <Button variant="ghost" size="sm" className="text-xs text-primary font-semibold">
-                      Detail
-                    </Button>
-                  </Link>
+            {donations.length > 0 ? (
+              donations.slice(0, 5).map((tx) => (
+                <TableRow key={tx.id}>
+                  <TableCell>
+                    <p className="font-mono font-bold text-xs text-foreground">{tx.donation_code}</p>
+                    <p className="text-[11px] text-muted-foreground">{formatDateIndo(tx.created_at)}</p>
+                  </TableCell>
+                  <TableCell className="max-w-[240px]">
+                    <p className="font-heading font-semibold text-xs text-foreground line-clamp-1">
+                      {tx.campaigns?.title || "Program Kebaikan"}
+                    </p>
+                    <span className="text-[11px] text-muted-foreground">{(tx.bank_destination || "").split(" ")[0]}</span>
+                  </TableCell>
+                  <TableCell>
+                    <p className="font-heading font-bold text-xs text-foreground tabular-nums">
+                      {formatRupiah(Number(tx.total_transfer))}
+                    </p>
+                    <p className="text-[10px] text-muted-foreground">Kode unik: +{tx.unique_code}</p>
+                  </TableCell>
+                  <TableCell>
+                    {tx.status === "verified" && (
+                      <Badge variant="success">Terverifikasi</Badge>
+                    )}
+                    {tx.status === "waiting_verification" && (
+                      <Badge variant="accent">Menunggu Verifikasi</Badge>
+                    )}
+                    {tx.status === "rejected" && (
+                      <Badge variant="destructive">Ditolak</Badge>
+                    )}
+                    {tx.status === "pending" && (
+                      <Badge variant="outline">Belum Upload Bukti</Badge>
+                    )}
+                    {tx.status === "expired" && (
+                      <Badge variant="outline" className="text-slate-400">Kedaluwarsa</Badge>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Link href={`/dashboard/riwayat-donasi/${tx.id}`}>
+                      <Button variant="ghost" size="sm" className="text-xs text-primary font-semibold">
+                        Detail
+                      </Button>
+                    </Link>
+                  </TableCell>
+                </TableRow>
+              ))
+            ) : (
+              <TableRow>
+                <TableCell colSpan={5} className="text-center py-12 text-muted-foreground text-xs">
+                  <div className="flex flex-col items-center justify-center gap-2">
+                    <HeartHandshake className="h-8 w-8 text-slate-300" />
+                    <span>Belum ada transaksi donasi yang tercatat di akun Anda.</span>
+                    <Link href="/kampanye" className="mt-1">
+                      <Button size="sm" className="font-bold text-xs">
+                        Jelajahi Kampanye Kebaikan
+                      </Button>
+                    </Link>
+                  </div>
                 </TableCell>
               </TableRow>
-            ))}
+            )}
           </TableBody>
         </Table>
       </Card>

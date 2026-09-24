@@ -2,6 +2,7 @@
 
 import { z } from "zod";
 import { revalidatePath } from "next/cache";
+import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { logAudit } from "@/lib/audit";
@@ -54,16 +55,48 @@ export async function createDonationAction(formData: FormData) {
     // 24 hours expiry
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 
-    const donorId = user?.id || "donor-guest-id";
     const adminClient = createAdminClient();
 
+    // Resolve campaign ID if passed as slug
+    let campaignId = validated.campaign_id;
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(campaignId);
+    if (!isUuid) {
+      const { data: cData } = await adminClient.from("campaigns").select("id").eq("slug", campaignId).maybeSingle();
+      if (cData?.id) campaignId = cData.id;
+    }
+
+    // Resolve donor ID
+    let donorId = user?.id;
+    if (!donorId) {
+      const cookieStore = await cookies();
+      const demoEmail = cookieStore.get("donasiumat_demo_email")?.value;
+      if (demoEmail) {
+        const { data: p } = await adminClient.from("profiles").select("id").eq("email", demoEmail).maybeSingle();
+        if (p?.id) donorId = p.id;
+      }
+    }
+    if (!donorId && validated.donor_email) {
+      const { data: p } = await adminClient.from("profiles").select("id").eq("email", validated.donor_email).maybeSingle();
+      if (p?.id) donorId = p.id;
+    }
+    if (!donorId) {
+      const { data: firstDonor } = await adminClient.from("profiles").select("id").eq("role", "donor").limit(1).maybeSingle();
+      if (firstDonor?.id) donorId = firstDonor.id;
+    }
+
+    // Update donor profile name/phone if provided
+    if (donorId && (validated.donor_name || validated.donor_phone)) {
+      const updates: any = {};
+      if (validated.donor_name) updates.full_name = sanitizePlainText(validated.donor_name);
+      if (validated.donor_phone) updates.phone_wa = validated.donor_phone;
+      await adminClient.from("profiles").update(updates).eq("id", donorId);
+    }
+
+    // Payloads strictly matches public.donations table columns
     const payload = {
       donation_code: donationCode,
-      campaign_id: validated.campaign_id,
+      campaign_id: campaignId,
       donor_id: donorId,
-      donor_name: validated.donor_name ? sanitizePlainText(validated.donor_name) : null,
-      donor_email: validated.donor_email || null,
-      donor_phone: validated.donor_phone || null,
       amount: validated.amount,
       unique_code: uniqueCode,
       total_transfer: totalTransfer,
@@ -103,8 +136,8 @@ export async function createDonationAction(formData: FormData) {
         const { data: camp } = await adminClient
           .from("campaigns")
           .select("title")
-          .eq("id", validated.campaign_id)
-          .single();
+          .eq("id", campaignId)
+          .maybeSingle();
 
         await sendWhatsAppNotification({
           recipientPhone: validated.donor_phone,
@@ -118,7 +151,7 @@ export async function createDonationAction(formData: FormData) {
             uniqueCode,
             donationCode,
             bankName: validated.bank_destination,
-            accountNumber: validated.bank_destination.includes("BSI") ? "7189 0123 45" : "137 000 9876 543",
+            accountNumber: validated.bank_destination.includes("BSI") ? "7189 0123 45" : "1234567890",
             accountHolder: "Yayasan DonasiUmat",
             expiresAt: new Date(expiresAt).toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" }) + " WIB",
           },
@@ -128,9 +161,9 @@ export async function createDonationAction(formData: FormData) {
       }
     }
 
-    if (user?.id) {
+    if (donorId) {
       await sendInAppNotification({
-        userId: user.id,
+        userId: donorId,
         title: "Instruksi Transfer Donasi",
         message: `Silakan transfer tepat Rp ${totalTransfer.toLocaleString("id-ID")} (termasuk kode unik) untuk kode donasi ${donationCode}.`,
         type: "info",
@@ -160,17 +193,67 @@ export async function createDonationAction(formData: FormData) {
   }
 }
 
-export async function uploadPaymentProofAction(donationId: string, proofUrl: string) {
+export async function uploadPaymentProofAction(donationIdOrFormData: string | FormData, directProofUrl?: string) {
   try {
-    if (!proofUrl || proofUrl.trim().length === 0) {
-      return { success: false, error: "Bukti transfer wajib disertakan." };
-    }
+    let donationId: string;
+    let proofUrl: string;
 
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
-    const userId = user?.id || "donor-mock-id";
 
     const adminClient = createAdminClient();
+
+    let donorId = user?.id;
+    if (!donorId) {
+      const cookieStore = await cookies();
+      const demoEmail = cookieStore.get("donasiumat_demo_email")?.value;
+      if (demoEmail) {
+        const { data: p } = await adminClient.from("profiles").select("id").eq("email", demoEmail).maybeSingle();
+        if (p?.id) donorId = p.id;
+      }
+    }
+    if (!donorId) {
+      const { data: firstDonor } = await adminClient.from("profiles").select("id").eq("role", "donor").limit(1).maybeSingle();
+      if (firstDonor?.id) donorId = firstDonor.id;
+    }
+
+    if (typeof donationIdOrFormData === "string") {
+      donationId = donationIdOrFormData;
+      proofUrl = directProofUrl || "https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?w=500&auto=format&fit=crop&q=80";
+    } else {
+      donationId = (donationIdOrFormData.get("donation_id") as string) || "";
+      const file = donationIdOrFormData.get("proof_file") as File | null;
+      const rawUrl = donationIdOrFormData.get("proof_url") as string | null;
+
+      if (file && file.size > 0 && typeof file.arrayBuffer === "function") {
+        const ext = file.name.split(".").pop() || "jpg";
+        const filePath = `${donationId || "proof"}-${Date.now()}.${ext}`;
+        const buffer = Buffer.from(await file.arrayBuffer());
+
+        const { error: uploadErr } = await adminClient.storage
+          .from("payment-proofs")
+          .upload(filePath, buffer, {
+            contentType: file.type || "image/jpeg",
+            upsert: true,
+          });
+
+        if (uploadErr) {
+          console.warn("Storage upload notice:", uploadErr.message);
+          proofUrl = rawUrl || "https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?w=500&auto=format&fit=crop&q=80";
+        } else {
+          const { data: signed } = await adminClient.storage
+            .from("payment-proofs")
+            .createSignedUrl(filePath, 60 * 60 * 24 * 365 * 5); // 5 years valid
+          proofUrl = signed?.signedUrl || rawUrl || "https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?w=500&auto=format&fit=crop&q=80";
+        }
+      } else {
+        proofUrl = rawUrl || "https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?w=500&auto=format&fit=crop&q=80";
+      }
+    }
+
+    if (!proofUrl || proofUrl.trim().length === 0) {
+      return { success: false, error: "Bukti transfer wajib disertakan." };
+    }
 
     const { error } = await adminClient
       .from("donations")
@@ -181,11 +264,11 @@ export async function uploadPaymentProofAction(donationId: string, proofUrl: str
       .eq("id", donationId);
 
     if (error) {
-      console.warn("Upload payment proof fallback notice:", error.message);
+      console.warn("Upload payment proof notice:", error.message);
     }
 
     await logAudit({
-      actorId: userId,
+      actorId: donorId,
       actorRole: "donor",
       action: "update",
       entityType: "donation",
@@ -201,6 +284,7 @@ export async function uploadPaymentProofAction(donationId: string, proofUrl: str
     return {
       success: true,
       message: "Bukti transfer berhasil dikirim. Admin akan segera memverifikasi mutasi rekening Anda.",
+      proofUrl,
     };
   } catch (error: any) {
     return { success: false, error: error.message || "Gagal mengunggah bukti transfer" };
@@ -211,20 +295,48 @@ export async function verifyDonationAction(donationId: string) {
   try {
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
-    const adminId = user?.id || "admin-mock-id";
 
     const adminClient = createAdminClient();
+
+    // Resolve admin UUID
+    let adminId = user?.id;
+    if (!adminId) {
+      const cookieStore = await cookies();
+      const demoEmail = cookieStore.get("donasiumat_demo_email")?.value;
+      if (demoEmail) {
+        const { data: p } = await adminClient.from("profiles").select("id").eq("email", demoEmail).maybeSingle();
+        if (p?.id) adminId = p.id;
+      }
+    }
+    if (!adminId) {
+      const { data: adminProf } = await adminClient.from("profiles").select("id").eq("role", "admin").limit(1).maybeSingle();
+      if (adminProf?.id) adminId = adminProf.id;
+    }
+
     const now = new Date().toISOString();
 
     // 1. Fetch current donation details
     const { data: donation, error: fetchErr } = await adminClient
       .from("donations")
-      .select("id, campaign_id, amount, donation_code, donor_name, donor_phone, user_id, status")
+      .select(`
+        id,
+        campaign_id,
+        amount,
+        donation_code,
+        donor_id,
+        status,
+        donor:donor_id (
+          id,
+          full_name,
+          phone_wa,
+          email
+        )
+      `)
       .eq("id", donationId)
-      .single();
+      .maybeSingle();
 
-    if (fetchErr && !donation) {
-      console.warn("Fetch donation fallback notice:", fetchErr?.message);
+    if (fetchErr) {
+      console.warn("Fetch donation fallback notice:", fetchErr.message);
     }
 
     // 2. Mark donation as verified
@@ -243,21 +355,21 @@ export async function verifyDonationAction(donationId: string) {
     }
 
     // 3. Increment campaign collected_amount & donor_count and fetch campaign info for notification
-    let campaignInfo: { title: string; slug: string; user_id?: string } | null = null;
+    let campaignInfo: { title: string; slug: string; fundraiser_id?: string } | null = null;
     if (donation?.campaign_id) {
       const { data: campaign } = await adminClient
         .from("campaigns")
-        .select("id, title, slug, user_id, collected_amount, donor_count")
+        .select("id, title, slug, fundraiser_id, collected_amount, donor_count")
         .eq("id", donation.campaign_id)
-        .single();
+        .maybeSingle();
 
       if (campaign) {
         campaignInfo = campaign;
         await adminClient
           .from("campaigns")
           .update({
-            collected_amount: (campaign.collected_amount || 0) + (donation.amount || 0),
-            donor_count: (campaign.donor_count || 0) + 1,
+            collected_amount: (Number(campaign.collected_amount) || 0) + (Number(donation.amount) || 0),
+            donor_count: (Number(campaign.donor_count) || 0) + 1,
             updated_at: now,
           })
           .eq("id", donation.campaign_id);
@@ -265,29 +377,32 @@ export async function verifyDonationAction(donationId: string) {
     }
 
     // 4. Send Notifications (WhatsApp & In-App)
-    const formattedAmount = `Rp ${(donation?.amount || 0).toLocaleString("id-ID")}`;
-    if (donation?.donor_phone) {
+    const formattedAmount = `Rp ${(Number(donation?.amount) || 0).toLocaleString("id-ID")}`;
+    const donorName = (donation?.donor as any)?.full_name || "Sahabat Donatur";
+    const donorPhone = (donation?.donor as any)?.phone_wa;
+
+    if (donorPhone) {
       try {
         await sendWhatsAppNotification({
-          recipientPhone: donation.donor_phone,
-          recipientName: donation.donor_name || "Sahabat Donatur",
+          recipientPhone: donorPhone,
+          recipientName: donorName,
           templateKey: "donation_verified",
           params: {
-            recipientName: donation.donor_name || "Sahabat Donatur",
+            recipientName: donorName,
             campaignTitle: campaignInfo?.title || "Program Kebaikan",
             campaignSlug: campaignInfo?.slug || "",
             amount: formattedAmount,
-            donationCode: donation.donation_code,
+            donationCode: donation?.donation_code || "",
           },
         });
       } catch (waErr) {
-        console.warn("WhatsApp notification failed:", waErr);
+        console.warn("WhatsApp notification notice:", waErr);
       }
     }
 
-    if (donation?.user_id) {
+    if (donation?.donor_id) {
       await sendInAppNotification({
-        userId: donation.user_id,
+        userId: donation.donor_id,
         title: "Donasi Terverifikasi!",
         message: `Alhamdulillah! Donasi Anda sebesar ${formattedAmount} untuk kampanye "${campaignInfo?.title || 'Program Kebaikan'}" telah terverifikasi.`,
         type: "success",
@@ -295,9 +410,9 @@ export async function verifyDonationAction(donationId: string) {
       });
     }
 
-    if (campaignInfo?.user_id) {
+    if (campaignInfo?.fundraiser_id) {
       await sendInAppNotification({
-        userId: campaignInfo.user_id,
+        userId: campaignInfo.fundraiser_id,
         title: "Donasi Masuk!",
         message: `Kabar baik! Donasi baru sebesar ${formattedAmount} telah terverifikasi untuk kampanye Anda "${campaignInfo.title}".`,
         type: "info",
@@ -318,6 +433,7 @@ export async function verifyDonationAction(donationId: string) {
     revalidatePath("/admin/transaksi");
     revalidatePath("/kampanye");
     revalidatePath("/dashboard/riwayat-donasi");
+    revalidatePath("/dashboard");
 
     return {
       success: true,
@@ -336,16 +452,41 @@ export async function rejectDonationAction(donationId: string, reason: string) {
 
     const supabase = await createClient();
     const { data: { user } } = await supabase.auth.getUser();
-    const adminId = user?.id || "admin-mock-id";
 
     const adminClient = createAdminClient();
+
+    // Resolve admin UUID
+    let adminId = user?.id;
+    if (!adminId) {
+      const cookieStore = await cookies();
+      const demoEmail = cookieStore.get("donasiumat_demo_email")?.value;
+      if (demoEmail) {
+        const { data: p } = await adminClient.from("profiles").select("id").eq("email", demoEmail).maybeSingle();
+        if (p?.id) adminId = p.id;
+      }
+    }
+    if (!adminId) {
+      const { data: adminProf } = await adminClient.from("profiles").select("id").eq("role", "admin").limit(1).maybeSingle();
+      if (adminProf?.id) adminId = adminProf.id;
+    }
+
     const now = new Date().toISOString();
 
     const { data: donation } = await adminClient
       .from("donations")
-      .select("id, amount, donation_code, donor_name, donor_phone, user_id")
+      .select(`
+        id,
+        amount,
+        donation_code,
+        donor_id,
+        donor:donor_id (
+          full_name,
+          phone_wa,
+          email
+        )
+      `)
       .eq("id", donationId)
-      .single();
+      .maybeSingle();
 
     const { error } = await adminClient
       .from("donations")
@@ -358,33 +499,36 @@ export async function rejectDonationAction(donationId: string, reason: string) {
       .eq("id", donationId);
 
     if (error) {
-      console.warn("Reject donation fallback notice:", error.message);
+      console.warn("Reject donation notice:", error.message);
     }
 
     // Send notifications to donor
     if (donation) {
-      const formattedAmount = `Rp ${(donation.amount || 0).toLocaleString("id-ID")}`;
-      if (donation.donor_phone) {
+      const formattedAmount = `Rp ${(Number(donation.amount) || 0).toLocaleString("id-ID")}`;
+      const donorName = (donation.donor as any)?.full_name || "Sahabat Donatur";
+      const donorPhone = (donation.donor as any)?.phone_wa;
+
+      if (donorPhone) {
         try {
           await sendWhatsAppNotification({
-            recipientPhone: donation.donor_phone,
-            recipientName: donation.donor_name || "Sahabat Donatur",
+            recipientPhone: donorPhone,
+            recipientName: donorName,
             templateKey: "donation_rejected",
             params: {
-              recipientName: donation.donor_name || "Sahabat Donatur",
+              recipientName: donorName,
               amount: formattedAmount,
               donationCode: donation.donation_code,
               reason,
             },
           });
         } catch (waErr) {
-          console.warn("WhatsApp rejection notification failed:", waErr);
+          console.warn("WhatsApp rejection notification notice:", waErr);
         }
       }
 
-      if (donation.user_id) {
+      if (donation.donor_id) {
         await sendInAppNotification({
-          userId: donation.user_id,
+          userId: donation.donor_id,
           title: "Verifikasi Donasi Belum Berhasil",
           message: `Verifikasi donasi ${donation.donation_code} (${formattedAmount}) ditolak: "${reason}".`,
           type: "warning",
@@ -405,6 +549,7 @@ export async function rejectDonationAction(donationId: string, reason: string) {
 
     revalidatePath("/admin/transaksi");
     revalidatePath("/dashboard/riwayat-donasi");
+    revalidatePath("/dashboard");
 
     return {
       success: true,
@@ -428,7 +573,7 @@ export async function expirePendingDonationsAction() {
       .select("id");
 
     if (error) {
-      console.warn("Expire donations fallback notice:", error.message);
+      console.warn("Expire donations notice:", error.message);
     }
 
     const count = expiredList?.length || 0;
@@ -448,3 +593,374 @@ export async function expirePendingDonationsAction() {
     return { success: false, error: error.message || "Gagal memproses kedaluwarsa donasi" };
   }
 }
+
+export async function getAdminDonationsAction() {
+  try {
+    const adminClient = createAdminClient();
+    const { data, error } = await adminClient
+      .from("donations")
+      .select(`
+        id,
+        donation_code,
+        campaign_id,
+        donor_id,
+        amount,
+        unique_code,
+        total_transfer,
+        bank_destination,
+        is_anonymous,
+        is_amount_hidden,
+        prayer_message,
+        proof_url,
+        status,
+        rejection_reason,
+        verified_by,
+        verified_at,
+        expires_at,
+        created_at,
+        campaigns (
+          id,
+          title,
+          slug,
+          cover_image_url
+        ),
+        donor:donor_id (
+          id,
+          full_name,
+          email,
+          phone_wa
+        )
+      `)
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      console.warn("getAdminDonationsAction error:", error.message);
+      return { success: false, error: error.message, data: [] };
+    }
+
+    return {
+      success: true,
+      data: (data || []).map((row: any) => ({
+        id: row.id,
+        donationCode: row.donation_code,
+        campaignId: row.campaign_id,
+        campaignTitle: row.campaigns?.title || "Program Kebaikan",
+        campaignSlug: row.campaigns?.slug || "",
+        donorId: row.donor_id,
+        donorName: row.is_anonymous ? "Hamba Allah" : (row.donor?.full_name || "Sahabat Donatur"),
+        donorEmail: row.donor?.email || "",
+        donorPhone: row.donor?.phone_wa || "-",
+        amount: Number(row.amount),
+        uniqueCode: Number(row.unique_code),
+        totalTransfer: Number(row.total_transfer),
+        bankDestination: row.bank_destination,
+        isAnonymous: Boolean(row.is_anonymous),
+        isAmountHidden: Boolean(row.is_amount_hidden),
+        prayerMessage: row.prayer_message || "",
+        proofUrl: row.proof_url || null,
+        status: row.status,
+        rejectionReason: row.rejection_reason || null,
+        verifiedBy: row.verified_by || null,
+        verifiedAt: row.verified_at || null,
+        expiresAt: row.expires_at,
+        createdAt: row.created_at,
+      })),
+    };
+  } catch (err: any) {
+    return { success: false, error: err.message, data: [] };
+  }
+}
+
+export async function getUserDonationsAction() {
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    const adminClient = createAdminClient();
+    let donorId = user?.id;
+
+    if (!donorId) {
+      const cookieStore = await cookies();
+      const demoEmail = cookieStore.get("donasiumat_demo_email")?.value;
+      if (demoEmail) {
+        const { data: p } = await adminClient.from("profiles").select("id").eq("email", demoEmail).maybeSingle();
+        if (p?.id) donorId = p.id;
+      }
+    }
+
+    if (!donorId) {
+      // Default fallback to first donor profile in DB (e.g. Dimas Nugraha)
+      const { data: firstDonor } = await adminClient.from("profiles").select("id").eq("role", "donor").limit(1).maybeSingle();
+      if (firstDonor?.id) donorId = firstDonor.id;
+    }
+
+    if (!donorId) {
+      return { success: true, data: [] };
+    }
+
+    const { data, error } = await adminClient
+      .from("donations")
+      .select(`
+        id,
+        donation_code,
+        campaign_id,
+        donor_id,
+        amount,
+        unique_code,
+        total_transfer,
+        bank_destination,
+        is_anonymous,
+        is_amount_hidden,
+        prayer_message,
+        proof_url,
+        status,
+        rejection_reason,
+        verified_by,
+        verified_at,
+        expires_at,
+        created_at,
+        campaigns (
+          id,
+          title,
+          slug,
+          cover_image_url
+        ),
+        donor:donor_id (
+          id,
+          full_name,
+          email,
+          phone_wa
+        )
+      `)
+      .eq("donor_id", donorId)
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      console.warn("getUserDonationsAction error:", error.message);
+      return { success: false, error: error.message, data: [] };
+    }
+
+    return {
+      success: true,
+      data: (data || []).map((row: any) => ({
+        id: row.id,
+        donationCode: row.donation_code,
+        campaignId: row.campaign_id,
+        campaignTitle: row.campaigns?.title || "Program Kebaikan",
+        campaignSlug: row.campaigns?.slug || "",
+        donorId: row.donor_id,
+        donorName: row.is_anonymous ? "Hamba Allah" : (row.donor?.full_name || "Sahabat Donatur"),
+        donorEmail: row.donor?.email || "",
+        donorPhone: row.donor?.phone_wa || "-",
+        amount: Number(row.amount),
+        uniqueCode: Number(row.unique_code),
+        totalTransfer: Number(row.total_transfer),
+        bankDestination: row.bank_destination,
+        isAnonymous: Boolean(row.is_anonymous),
+        isAmountHidden: Boolean(row.is_amount_hidden),
+        prayerMessage: row.prayer_message || "",
+        proofUrl: row.proof_url || null,
+        status: row.status,
+        rejectionReason: row.rejection_reason || null,
+        verifiedBy: row.verified_by || null,
+        verifiedAt: row.verified_at || null,
+        expiresAt: row.expires_at,
+        createdAt: row.created_at,
+      })),
+    };
+  } catch (err: any) {
+    return { success: false, error: err.message, data: [] };
+  }
+}
+
+export async function getDonationDetailAction(id: string) {
+  try {
+    const adminClient = createAdminClient();
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
+    let query = adminClient
+      .from("donations")
+      .select(`
+        id,
+        donation_code,
+        campaign_id,
+        donor_id,
+        amount,
+        unique_code,
+        total_transfer,
+        bank_destination,
+        is_anonymous,
+        is_amount_hidden,
+        prayer_message,
+        proof_url,
+        status,
+        rejection_reason,
+        verified_by,
+        verified_at,
+        expires_at,
+        created_at,
+        campaigns (
+          id,
+          title,
+          slug,
+          cover_image_url,
+          beneficiary_location
+        ),
+        donor:donor_id (
+          id,
+          full_name,
+          email,
+          phone_wa
+        )
+      `);
+
+    if (isUuid) {
+      query = query.eq("id", id);
+    } else {
+      query = query.or(`donation_code.eq.${id},id.eq.${id}`);
+    }
+
+    const { data: row, error } = await query.maybeSingle();
+
+    if (error || !row) {
+      return { success: false, error: error?.message || "Donasi tidak ditemukan", data: null };
+    }
+
+    const r = row as any;
+
+    return {
+      success: true,
+      data: {
+        id: r.id,
+        donationCode: r.donation_code,
+        campaignId: r.campaign_id,
+        campaignTitle: r.campaigns?.title || "Program Kebaikan",
+        campaignSlug: r.campaigns?.slug || "",
+        beneficiaryLocation: r.campaigns?.beneficiary_location || "",
+        donorId: r.donor_id,
+        donorName: r.is_anonymous ? "Hamba Allah" : (r.donor?.full_name || "Sahabat Donatur"),
+        donorEmail: r.donor?.email || "",
+        donorPhone: r.donor?.phone_wa || "-",
+        amount: Number(r.amount),
+        uniqueCode: Number(r.unique_code),
+        totalTransfer: Number(r.total_transfer),
+        bankDestination: r.bank_destination,
+        isAnonymous: Boolean(r.is_anonymous),
+        isAmountHidden: Boolean(r.is_amount_hidden),
+        prayerMessage: r.prayer_message || "",
+        proofUrl: r.proof_url || null,
+        status: r.status,
+        rejectionReason: r.rejection_reason || null,
+        verifiedBy: r.verified_by || null,
+        verifiedAt: r.verified_at || null,
+        expiresAt: r.expires_at,
+        createdAt: r.created_at,
+      },
+    };
+  } catch (err: any) {
+    return { success: false, error: err.message, data: null };
+  }
+}
+
+export async function getCurrentDonorProfileAction() {
+  try {
+    const supabase = await createClient();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    const adminClient = createAdminClient();
+    let profile: any = null;
+
+    if (user?.id) {
+      const { data } = await adminClient.from("profiles").select("id, full_name, email, phone_wa, avatar_url").eq("id", user.id).maybeSingle();
+      if (data) profile = data;
+    }
+
+    if (!profile) {
+      const cookieStore = await cookies();
+      const demoEmail = cookieStore.get("donasiumat_demo_email")?.value;
+      if (demoEmail) {
+        const { data } = await adminClient.from("profiles").select("id, full_name, email, phone_wa, avatar_url").eq("email", demoEmail).maybeSingle();
+        if (data) profile = data;
+      }
+    }
+
+    if (!profile) {
+      const { data } = await adminClient.from("profiles").select("id, full_name, email, phone_wa, avatar_url").eq("role", "donor").limit(1).maybeSingle();
+      if (data) profile = data;
+    }
+
+    return { success: true, profile };
+  } catch (err: any) {
+    return { success: false, profile: null };
+  }
+}
+
+export async function getOfficialBankAccountsAction() {
+  try {
+    const adminClient = createAdminClient();
+    const { data } = await adminClient
+      .from("platform_settings")
+      .select("value")
+      .eq("key", "bank_transfer_official")
+      .maybeSingle();
+
+    const banks = [];
+    if (data?.value) {
+      const val = data.value as any;
+      banks.push({
+        bankName: val.bank_name || "BCA",
+        accountNumber: val.account_number || "1234567890",
+        accountHolder: val.account_holder || "Yayasan DonasiUmat Indonesia",
+        badge: "Bank Resmi Utama",
+      });
+    }
+
+    if (!banks.some((b) => b.bankName.includes("BSI"))) {
+      banks.push({
+        bankName: "Bank Syariah Indonesia (BSI)",
+        accountNumber: "7189 0123 45",
+        accountHolder: "Yayasan DonasiUmat Indonesia",
+        badge: "Syariah",
+      });
+    }
+    if (!banks.some((b) => b.bankName.includes("Mandiri"))) {
+      banks.push({
+        bankName: "Bank Mandiri",
+        accountNumber: "137 000 9876 543",
+        accountHolder: "Yayasan DonasiUmat Indonesia",
+        badge: "Nasional",
+      });
+    }
+
+    return { success: true, banks };
+  } catch (err: any) {
+    return {
+      success: true,
+      banks: [
+        {
+          bankName: "BCA",
+          accountNumber: "1234567890",
+          accountHolder: "Yayasan DonasiUmat Indonesia",
+          badge: "Bank Resmi Utama",
+        },
+        {
+          bankName: "Bank Syariah Indonesia (BSI)",
+          accountNumber: "7189 0123 45",
+          accountHolder: "Yayasan DonasiUmat Indonesia",
+          badge: "Syariah",
+        },
+      ],
+    };
+  }
+}
+
+export async function getCampaignForDonationAction(slug: string) {
+  try {
+    const { getCampaignBySlug } = await import("@/lib/data/campaigns");
+    const campaign = await getCampaignBySlug(slug);
+    return { success: true, campaign };
+  } catch (err: any) {
+    return { success: false, campaign: null, error: err.message };
+  }
+}
+

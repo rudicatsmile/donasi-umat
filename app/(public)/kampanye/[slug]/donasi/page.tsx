@@ -16,30 +16,57 @@ import {
   AlertCircle,
   HelpCircle,
   Building,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent } from "@/components/ui/card";
-import {
-  DUMMY_CAMPAIGNS,
-  OFFICIAL_BANK_ACCOUNTS,
-  Campaign,
-} from "@/lib/dummy-data";
+import { Card } from "@/components/ui/card";
+import { Campaign } from "@/lib/dummy-data";
 import { formatRupiah } from "@/lib/utils";
 import { toast } from "sonner";
-import { createDonationAction, uploadPaymentProofAction } from "@/app/actions/donations";
+import {
+  createDonationAction,
+  uploadPaymentProofAction,
+  getCampaignForDonationAction,
+  getCurrentDonorProfileAction,
+  getOfficialBankAccountsAction,
+} from "@/app/actions/donations";
 
 const QUICK_AMOUNTS = [
   10000, 25000, 50000, 100000, 250000, 500000, 1000000
 ];
 
+interface BankAccount {
+  bankName: string;
+  accountNumber: string;
+  accountHolder: string;
+  badge?: string;
+}
+
 export default function DonationFormPage() {
   const params = useParams();
   const router = useRouter();
   const slug = params?.slug as string;
-  const campaign = DUMMY_CAMPAIGNS.find((c) => c.slug === slug) || DUMMY_CAMPAIGNS[0];
+
+  // Initial loading states
+  const [isInitializing, setIsInitializing] = React.useState(true);
+  const [campaign, setCampaign] = React.useState<Campaign | null>(null);
+  const [officialBanks, setOfficialBanks] = React.useState<BankAccount[]>([
+    {
+      bankName: "BCA",
+      accountNumber: "1234567890",
+      accountHolder: "Yayasan DonasiUmat Indonesia",
+      badge: "Bank Resmi Utama",
+    },
+    {
+      bankName: "Bank Syariah Indonesia (BSI)",
+      accountNumber: "7189 0123 45",
+      accountHolder: "Yayasan DonasiUmat Indonesia",
+      badge: "Syariah",
+    },
+  ]);
 
   // Steps: 1: Nominal & Data -> 2: Instruksi Transfer & Upload -> 3: Sukses Terkirim
   const [currentStep, setCurrentStep] = React.useState<1 | 2 | 3>(1);
@@ -47,17 +74,25 @@ export default function DonationFormPage() {
   // Form states
   const [amount, setAmount] = React.useState<number>(100000);
   const [customAmount, setCustomAmount] = React.useState<string>("100000");
-  const [selectedBank, setSelectedBank] = React.useState(OFFICIAL_BANK_ACCOUNTS[0]);
-  const [donorName, setDonorName] = React.useState("Dimas Nugraha");
-  const [donorPhone, setDonorPhone] = React.useState("+6281234567890");
+  const [selectedBank, setSelectedBank] = React.useState<BankAccount>({
+    bankName: "BCA",
+    accountNumber: "1234567890",
+    accountHolder: "Yayasan DonasiUmat Indonesia",
+    badge: "Bank Resmi Utama",
+  });
+  const [donorName, setDonorName] = React.useState("");
+  const [donorEmail, setDonorEmail] = React.useState("");
+  const [donorPhone, setDonorPhone] = React.useState("");
   const [prayerMessage, setPrayerMessage] = React.useState("");
   const [isAnonymous, setIsAnonymous] = React.useState(false);
   const [isAmountHidden, setIsAmountHidden] = React.useState(false);
 
   // Server response states
   const [donationId, setDonationId] = React.useState<string>("");
+  const [donationCode, setDonationCode] = React.useState<string>("");
   const [uniqueCode, setUniqueCode] = React.useState<number>(() => Math.floor(100 + Math.random() * 899));
   const [totalTransfer, setTotalTransfer] = React.useState<number>(100000 + uniqueCode);
+  const [expiresAt, setExpiresAt] = React.useState<string>("");
 
   // File upload preview
   const [proofFile, setProofFile] = React.useState<File | null>(null);
@@ -65,6 +100,43 @@ export default function DonationFormPage() {
   const [copiedBank, setCopiedBank] = React.useState(false);
   const [copiedAmount, setCopiedAmount] = React.useState(false);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
+
+  React.useEffect(() => {
+    async function initData() {
+      setIsInitializing(true);
+      try {
+        // 1. Fetch real campaign
+        const campRes = await getCampaignForDonationAction(slug);
+        if (campRes.success && campRes.campaign) {
+          setCampaign(campRes.campaign as unknown as Campaign);
+        }
+
+        // 2. Fetch real official banks from platform_settings
+        const banksRes = await getOfficialBankAccountsAction();
+        if (banksRes.success && banksRes.banks?.length) {
+          setOfficialBanks(banksRes.banks);
+          setSelectedBank(banksRes.banks[0]);
+        }
+
+        // 3. Pre-fill donor info if logged in or demo mode
+        const profileRes = await getCurrentDonorProfileAction();
+        if (profileRes.success && profileRes.profile) {
+          const p = profileRes.profile;
+          if (p.full_name) setDonorName(p.full_name);
+          if (p.email) setDonorEmail(p.email);
+          if (p.phone_wa) setDonorPhone(p.phone_wa);
+        }
+      } catch (err) {
+        console.error("Initialization error:", err);
+      } finally {
+        setIsInitializing(false);
+      }
+    }
+
+    if (slug) {
+      initData();
+    }
+  }, [slug]);
 
   const handleSelectQuickAmount = (val: number) => {
     setAmount(val);
@@ -108,23 +180,31 @@ export default function DonationFormPage() {
       toast.error("Nominal donasi minimal Rp 10.000");
       return;
     }
+    if (!campaign) {
+      toast.error("Data kampanye belum siap. Silakan coba kembali.");
+      return;
+    }
+
     setIsSubmitting(true);
     try {
       const formData = new FormData();
       formData.append("campaign_id", campaign.id);
       formData.append("amount", amount.toString());
-      formData.append("bank_destination", selectedBank.bankName);
+      formData.append("bank_destination", `${selectedBank.bankName} (${selectedBank.accountNumber} a.n ${selectedBank.accountHolder})`);
       formData.append("is_anonymous", isAnonymous ? "true" : "false");
       formData.append("is_amount_hidden", isAmountHidden ? "true" : "false");
       if (prayerMessage) formData.append("prayer_message", prayerMessage);
       if (donorName) formData.append("donor_name", donorName);
+      if (donorEmail) formData.append("donor_email", donorEmail);
       if (donorPhone) formData.append("donor_phone", donorPhone);
 
       const res = await createDonationAction(formData);
       if (res.success) {
         if (res.donationId) setDonationId(res.donationId);
+        if (res.donationCode) setDonationCode(res.donationCode);
         if (res.uniqueCode) setUniqueCode(res.uniqueCode);
         if (res.totalTransfer) setTotalTransfer(res.totalTransfer);
+        if (res.expiresAt) setExpiresAt(res.expiresAt);
         setCurrentStep(2);
         toast.success("Instruksi transfer berhasil dibuat!");
       } else {
@@ -144,15 +224,22 @@ export default function DonationFormPage() {
     }
     setIsSubmitting(true);
     try {
-      const targetId = donationId || `don-${Date.now()}`;
-      const targetUrl = proofPreview || "https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?auto=format&fit=crop&q=80&w=800";
-      const res = await uploadPaymentProofAction(targetId, targetUrl);
+      const formData = new FormData();
+      formData.append("donation_id", donationId);
+      if (proofFile) {
+        formData.append("proof_file", proofFile);
+      }
+      if (proofPreview) {
+        formData.append("proof_url", proofPreview);
+      }
+
+      const res = await uploadPaymentProofAction(formData);
 
       if (res.success) {
         setCurrentStep(3);
         toast.success(res.message || "Bukti transfer berhasil diunggah!");
       } else {
-        toast.error(res.error || "Gagal mengunggah bukti");
+        toast.error(res.error || "Gagal mengunggah bukti transfer");
       }
     } catch (err: any) {
       toast.error(err.message || "Terjadi kesalahan pengunggahan");
@@ -160,6 +247,36 @@ export default function DonationFormPage() {
       setIsSubmitting(false);
     }
   };
+
+  if (isInitializing) {
+    return (
+      <div className="py-24 bg-slate-50 min-h-screen flex flex-col items-center justify-center gap-3 text-muted-foreground">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        <p className="text-xs font-medium">Memuat formulir donasi resmi...</p>
+      </div>
+    );
+  }
+
+  if (!campaign) {
+    return (
+      <div className="py-20 bg-slate-50 min-h-screen">
+        <div className="container mx-auto px-4 max-w-md text-center space-y-4">
+          <div className="h-12 w-12 rounded-full bg-red-100 text-red-600 flex items-center justify-center mx-auto">
+            <AlertCircle className="h-6 w-6" />
+          </div>
+          <h2 className="font-heading font-bold text-lg text-foreground">Program Kampanye Tidak Ditemukan</h2>
+          <p className="text-xs text-muted-foreground">
+            Program galang dana tidak ditemukan di database. Pastikan tautan URL sudah benar.
+          </p>
+          <Link href="/kampanye">
+            <Button size="sm">
+              Lihat Daftar Kampanye
+            </Button>
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="py-8 lg:py-14 bg-slate-50 min-h-screen">
@@ -259,7 +376,7 @@ export default function DonationFormPage() {
                 Pilih Rekening Bank Tujuan
               </label>
               <div className="space-y-2">
-                {OFFICIAL_BANK_ACCOUNTS.map((bank) => (
+                {officialBanks.map((bank) => (
                   <label
                     key={bank.bankName}
                     className={`flex items-center justify-between p-3.5 rounded-xl border cursor-pointer transition-all ${
@@ -281,11 +398,54 @@ export default function DonationFormPage() {
                         <p className="text-xs text-muted-foreground">a.n {bank.accountHolder}</p>
                       </div>
                     </div>
-                    <Badge variant="outline" className="text-[10px]">
-                      {bank.badge}
-                    </Badge>
+                    {bank.badge && (
+                      <Badge variant="outline" className="text-[10px]">
+                        {bank.badge}
+                      </Badge>
+                    )}
                   </label>
                 ))}
+              </div>
+            </div>
+
+            {/* Donor Identity Fields */}
+            <div className="space-y-3 pt-2 border-t border-border">
+              <label className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                Informasi Donatur
+              </label>
+              <div className="space-y-3">
+                <div>
+                  <label className="text-xs font-medium text-slate-600 block mb-1">Nama Lengkap</label>
+                  <Input
+                    type="text"
+                    value={donorName}
+                    onChange={(e) => setDonorName(e.target.value)}
+                    placeholder="Nama Anda"
+                    className="text-xs sm:text-sm"
+                  />
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs font-medium text-slate-600 block mb-1">Nomor WhatsApp</label>
+                    <Input
+                      type="tel"
+                      value={donorPhone}
+                      onChange={(e) => setDonorPhone(e.target.value)}
+                      placeholder="+6281234567890"
+                      className="text-xs sm:text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-slate-600 block mb-1">Email (opsional)</label>
+                    <Input
+                      type="email"
+                      value={donorEmail}
+                      onChange={(e) => setDonorEmail(e.target.value)}
+                      placeholder="email@anda.com"
+                      className="text-xs sm:text-sm"
+                    />
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -334,7 +494,14 @@ export default function DonationFormPage() {
               onClick={handleProceedToStep2}
               className="w-full font-bold shadow-md shadow-primary/20"
             >
-              {isSubmitting ? "Memproses Data..." : "Lanjutkan ke Instruksi Transfer"}
+              {isSubmitting ? (
+                <span className="flex items-center gap-2">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Membuat Instruksi Donasi...
+                </span>
+              ) : (
+                "Lanjutkan ke Instruksi Transfer"
+              )}
             </Button>
           </Card>
         )}
@@ -437,7 +604,7 @@ export default function DonationFormPage() {
                     />
                     <p className="text-xs text-emerald-700 font-semibold flex items-center justify-center gap-1">
                       <FileCheck className="h-4 w-4" />
-                      Bukti transfer siap dikirim: {proofFile?.name}
+                      Bukti transfer siap dikirim: {proofFile?.name || "Bukti Transfer"}
                     </p>
                     <label className="cursor-pointer inline-block text-xs text-primary underline font-medium">
                       Ganti Foto Bukti
@@ -479,16 +646,23 @@ export default function DonationFormPage() {
                   onClick={() => setCurrentStep(1)}
                   className="w-1/3"
                 >
-                  Ubah Nominal
+                  Ubah Data
                 </Button>
                 <Button
                   type="button"
                   size="lg"
-                  disabled={!proofFile || isSubmitting}
+                  disabled={(!proofFile && !proofPreview) || isSubmitting}
                   onClick={handleSubmitProof}
                   className="w-2/3 font-bold shadow-md shadow-primary/20"
                 >
-                  {isSubmitting ? "Mengunggah..." : "Kirim Bukti Transfer"}
+                  {isSubmitting ? (
+                    <span className="flex items-center gap-2">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Mengunggah Bukti...
+                    </span>
+                  ) : (
+                    "Kirim Bukti Transfer"
+                  )}
                 </Button>
               </div>
             </Card>
@@ -510,7 +684,7 @@ export default function DonationFormPage() {
                 Jazakallahu Khairan!
               </h2>
               <p className="text-sm text-muted-foreground max-w-md mx-auto">
-                Terima kasih, Sahabat Umat. Bukti transfer Anda sebesar <strong>{formatRupiah(totalTransfer)}</strong> telah kami terima.
+                Terima kasih, Sahabat Umat. Bukti transfer Anda sebesar <strong>{formatRupiah(totalTransfer)}</strong> telah kami terima di sistem.
               </p>
             </div>
 
@@ -518,7 +692,7 @@ export default function DonationFormPage() {
             <div className="rounded-xl border border-border bg-slate-50 p-4 text-xs text-left space-y-2 max-w-md mx-auto">
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Kode Transaksi:</span>
-                <span className="font-mono font-bold text-foreground">DON-2024-0925</span>
+                <span className="font-mono font-bold text-foreground">{donationCode || "DON-TERCATAT"}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Bank Tujuan:</span>
@@ -526,7 +700,7 @@ export default function DonationFormPage() {
               </div>
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Nama Donatur:</span>
-                <span className="font-semibold text-foreground">{isAnonymous ? "Hamba Allah" : donorName}</span>
+                <span className="font-semibold text-foreground">{isAnonymous ? "Hamba Allah" : (donorName || "Sahabat Donatur")}</span>
               </div>
               <div className="flex justify-between border-t border-border/80 pt-2">
                 <span className="text-muted-foreground">Status Verifikasi:</span>
@@ -539,9 +713,9 @@ export default function DonationFormPage() {
             </p>
 
             <div className="flex flex-col sm:flex-row gap-3 pt-2 max-w-md mx-auto">
-              <Link href="/dashboard/riwayat-donasi" className="w-full">
+              <Link href={`/dashboard/riwayat-donasi/${donationId || ""}`} className="w-full">
                 <Button className="w-full font-bold">
-                  Lihat Riwayat Donasi
+                  Lihat Kuitansi Donasi
                 </Button>
               </Link>
               <Link href="/kampanye" className="w-full">

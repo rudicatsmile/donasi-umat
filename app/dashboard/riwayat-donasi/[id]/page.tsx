@@ -14,34 +14,84 @@ import {
   ExternalLink,
   ShieldCheck,
   FileCheck,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
-import { DUMMY_TRANSACTIONS } from "@/lib/dummy-data";
 import { formatRupiah, formatDateIndo } from "@/lib/utils";
+import { getDonationDetailAction } from "@/app/actions/donations";
 import { toast } from "sonner";
 
 export default function DonationDetailPage() {
   const params = useParams();
   const id = params?.id as string;
-  const tx = DUMMY_TRANSACTIONS.find((t) => t.id === id) || DUMMY_TRANSACTIONS[0];
+  const [tx, setTx] = React.useState<any | null>(null);
+  const [isLoading, setIsLoading] = React.useState(true);
+
+  React.useEffect(() => {
+    async function loadDetail() {
+      if (!id) return;
+      setIsLoading(true);
+      try {
+        const res = await getDonationDetailAction(id);
+        if (res.success && res.data) {
+          setTx(res.data);
+        } else {
+          toast.error(res.error || "Data donasi tidak ditemukan");
+        }
+      } catch (err: any) {
+        toast.error(err.message || "Gagal memuat detail donasi");
+      } finally {
+        setIsLoading(false);
+      }
+    }
+    loadDetail();
+  }, [id]);
 
   const handlePrintReceipt = () => {
     window.print();
   };
 
+  if (isLoading) {
+    return (
+      <div className="py-24 flex flex-col items-center justify-center gap-3 text-muted-foreground">
+        <Loader2 className="h-8 w-8 animate-spin text-primary" />
+        <p className="text-xs font-medium">Memuat kuitansi donasi dari Supabase...</p>
+      </div>
+    );
+  }
+
+  if (!tx) {
+    return (
+      <div className="py-20 text-center space-y-4 max-w-md mx-auto">
+        <div className="h-12 w-12 rounded-full bg-red-100 text-red-600 flex items-center justify-center mx-auto">
+          <AlertCircle className="h-6 w-6" />
+        </div>
+        <h2 className="font-heading font-bold text-lg text-foreground">Kuitansi Tidak Ditemukan</h2>
+        <p className="text-xs text-muted-foreground">
+          Transaksi dengan identitas tersebut tidak tercatat di database atau telah dihapus.
+        </p>
+        <Link href="/dashboard/riwayat-donasi">
+          <Button size="sm" variant="outline">
+            Kembali ke Riwayat Donasi
+          </Button>
+        </Link>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6 max-w-4xl mx-auto">
       <Link
         href="/dashboard/riwayat-donasi"
-        className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+        className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground print:hidden"
       >
         <ArrowLeft className="h-4 w-4" />
         Kembali ke Riwayat Donasi
       </Link>
 
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 print:hidden">
         <div>
           <div className="flex items-center gap-2">
             <h1 className="font-heading text-2xl font-extrabold text-foreground">
@@ -61,17 +111,19 @@ export default function DonationDetailPage() {
             <Printer className="h-4 w-4" />
             Cetak Kuitansi
           </Button>
-          <Link href={`/kampanye/${tx.campaignSlug}`}>
-            <Button size="sm" className="gap-1.5 text-xs font-semibold">
-              Lihat Kampanye
-              <ExternalLink className="h-3.5 w-3.5" />
-            </Button>
-          </Link>
+          {tx.campaignSlug && (
+            <Link href={`/kampanye/${tx.campaignSlug}`}>
+              <Button size="sm" className="gap-1.5 text-xs font-semibold">
+                Lihat Kampanye
+                <ExternalLink className="h-3.5 w-3.5" />
+              </Button>
+            </Link>
+          )}
         </div>
       </div>
 
       {/* Main Receipt Card */}
-      <Card className="p-8 sm:p-10 shadow-sm border-border bg-white space-y-8 print:shadow-none print:border-none">
+      <Card className="p-8 sm:p-10 shadow-sm border-border bg-white space-y-8 print:shadow-none print:border-none print:p-0">
         {/* Receipt Header */}
         <div className="flex flex-col sm:flex-row justify-between items-start border-b border-border pb-6 gap-4">
           <div>
@@ -99,6 +151,16 @@ export default function DonationDetailPage() {
                 ✕ Bukti Transfer Ditolak
               </Badge>
             )}
+            {tx.status === "pending" && (
+              <Badge variant="outline" className="text-xs font-bold px-3 py-1">
+                Belum Upload Bukti
+              </Badge>
+            )}
+            {tx.status === "expired" && (
+              <Badge variant="outline" className="text-xs font-bold px-3 py-1 text-slate-400">
+                Kedaluwarsa
+              </Badge>
+            )}
           </div>
         </div>
 
@@ -110,7 +172,7 @@ export default function DonationDetailPage() {
               <p className="font-heading font-bold text-foreground text-sm">
                 {tx.isAnonymous ? "Hamba Allah (Anonim)" : tx.donorName}
               </p>
-              <p className="text-xs text-muted-foreground">{tx.donorEmail}</p>
+              {tx.donorEmail && <p className="text-xs text-muted-foreground">{tx.donorEmail}</p>}
             </div>
             <div>
               <p className="text-muted-foreground text-xs">Rekening Bank Tujuan:</p>
@@ -127,7 +189,7 @@ export default function DonationDetailPage() {
               <div>
                 <p className="text-muted-foreground text-xs">Diverifikasi oleh Admin:</p>
                 <p className="font-semibold text-emerald-700">
-                  {tx.verifiedBy} pada {formatDateIndo(tx.verifiedAt)}
+                  {tx.verifiedBy || "Admin"} pada {formatDateIndo(tx.verifiedAt)}
                 </p>
               </div>
             )}
@@ -167,11 +229,16 @@ export default function DonationDetailPage() {
           <p className="font-heading font-bold text-sm text-foreground">
             {tx.campaignTitle}
           </p>
+          {tx.beneficiaryLocation && (
+            <p className="text-[11px] text-muted-foreground">
+              Wilayah Penerima Manfaat: {tx.beneficiaryLocation}
+            </p>
+          )}
         </div>
 
         {/* Attached Proof of Transfer Preview */}
         {tx.proofUrl && (
-          <div className="space-y-2 border-t border-border pt-6">
+          <div className="space-y-2 border-t border-border pt-6 print:hidden">
             <p className="font-heading font-bold text-xs uppercase tracking-wider text-muted-foreground">
               Lampiran Bukti Transfer yang Diunggah
             </p>
