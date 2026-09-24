@@ -45,6 +45,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { logoutAction, setDemoSessionAction } from "@/app/actions/auth";
 
 interface DashboardShellProps {
   children: React.ReactNode;
@@ -61,6 +62,16 @@ interface NavItem {
 export function DashboardShell({ children, activeRole }: DashboardShellProps) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = React.useState(false);
+
+  const handleSwitchDemoRole = async (targetRole: "donor" | "fundraiser" | "admin", href: string) => {
+    await setDemoSessionAction(targetRole);
+    window.location.href = href;
+  };
+
+  const handleLogout = async () => {
+    await logoutAction();
+    window.location.href = "/login";
+  };
 
   const donorNav: NavItem[] = [
     { title: "Ringkasan Dasbor", href: "/dashboard", icon: LayoutDashboard },
@@ -154,14 +165,23 @@ export function DashboardShell({ children, activeRole }: DashboardShellProps) {
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-48">
                 <DropdownMenuLabel className="text-xs">Ganti Tampilan Role (Demo)</DropdownMenuLabel>
-                <DropdownMenuItem asChild>
-                  <Link href="/dashboard" className="text-xs">Dasbor Donatur</Link>
+                <DropdownMenuItem
+                  onClick={() => handleSwitchDemoRole("donor", "/dashboard")}
+                  className="text-xs cursor-pointer"
+                >
+                  Dasbor Donatur
                 </DropdownMenuItem>
-                <DropdownMenuItem asChild>
-                  <Link href="/galang-dana/kampanye-saya" className="text-xs">Dasbor Penggalang</Link>
+                <DropdownMenuItem
+                  onClick={() => handleSwitchDemoRole("fundraiser", "/galang-dana/kampanye-saya")}
+                  className="text-xs cursor-pointer"
+                >
+                  Dasbor Penggalang
                 </DropdownMenuItem>
-                <DropdownMenuItem asChild>
-                  <Link href="/admin/dashboard" className="text-xs">Panel Admin</Link>
+                <DropdownMenuItem
+                  onClick={() => handleSwitchDemoRole("admin", "/admin/dashboard")}
+                  className="text-xs cursor-pointer"
+                >
+                  Panel Admin
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -219,11 +239,15 @@ export function DashboardShell({ children, activeRole }: DashboardShellProps) {
                 </span>
               </div>
             </div>
-            <Link href="/" title="Kembali ke Beranda Publik">
-              <Button variant="ghost" size="icon" className="h-8 w-8 text-slate-400 hover:text-foreground">
-                <LogOut className="h-4 w-4" />
-              </Button>
-            </Link>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={handleLogout}
+              title="Keluar Sesi"
+              className="h-8 w-8 text-slate-400 hover:text-red-600"
+            >
+              <LogOut className="h-4 w-4" />
+            </Button>
           </div>
         </div>
       </aside>
@@ -333,11 +357,12 @@ export function DashboardShell({ children, activeRole }: DashboardShellProps) {
                   <Link href="/dashboard/notifikasi" className="text-xs">Notifikasi Sistem</Link>
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem asChild>
-                  <Link href="/" className="text-xs text-red-600 focus:text-red-600">
-                    <LogOut className="h-3.5 w-3.5 mr-2" />
-                    Keluar Sesi
-                  </Link>
+                <DropdownMenuItem
+                  onClick={handleLogout}
+                  className="text-xs text-red-600 focus:text-red-600 cursor-pointer"
+                >
+                  <LogOut className="h-3.5 w-3.5 mr-2" />
+                  Keluar Sesi
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>

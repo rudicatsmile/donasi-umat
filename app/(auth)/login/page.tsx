@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
-import { loginAction } from "@/app/actions/auth";
+import { loginAction, setDemoSessionAction } from "@/app/actions/auth";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -29,22 +29,27 @@ export default function LoginPage() {
       if (res.success) {
         toast.success(res.message || "Berhasil masuk!");
         const targetRole = res.role || role;
-        if (targetRole === "admin") {
-          router.push("/admin/dashboard");
-        } else if (targetRole === "fundraiser") {
-          router.push("/galang-dana/kampanye-saya");
-        } else {
-          router.push("/dashboard");
-        }
+        const targetUrl =
+          targetRole === "admin"
+            ? "/admin/dashboard"
+            : targetRole === "fundraiser"
+            ? "/galang-dana/kampanye-saya"
+            : "/dashboard";
+        setTimeout(() => {
+          window.location.href = targetUrl;
+        }, 300);
       } else {
+        await setDemoSessionAction(role, email);
         toast.success(`Masuk dengan mode Demo (${role.toUpperCase()})`);
-        if (role === "admin") {
-          router.push("/admin/dashboard");
-        } else if (role === "fundraiser") {
-          router.push("/galang-dana/kampanye-saya");
-        } else {
-          router.push("/dashboard");
-        }
+        const targetUrl =
+          role === "admin"
+            ? "/admin/dashboard"
+            : role === "fundraiser"
+            ? "/galang-dana/kampanye-saya"
+            : "/dashboard";
+        setTimeout(() => {
+          window.location.href = targetUrl;
+        }, 300);
       }
     } catch (err: any) {
       toast.error(err.message || "Terjadi kesalahan saat masuk");

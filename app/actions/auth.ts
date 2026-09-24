@@ -2,6 +2,7 @@
 
 import { z } from "zod";
 import { revalidatePath } from "next/cache";
+import { cookies } from "next/headers";
 import { createClient } from "@/lib/supabase/server";
 import { logAudit } from "@/lib/audit";
 
@@ -120,7 +121,34 @@ export async function registerAction(formData: FormData) {
   return { success: true, message: "Pendaftaran berhasil! Silakan periksa email Anda untuk verifikasi." };
 }
 
+export async function setDemoSessionAction(
+  role: "donor" | "fundraiser" | "admin",
+  email?: string
+) {
+  const cookieStore = await cookies();
+  cookieStore.set("donasiumat_demo_role", role, {
+    path: "/",
+    httpOnly: true,
+    maxAge: 60 * 60 * 24 * 7, // 7 hari
+    sameSite: "lax",
+  });
+  if (email) {
+    cookieStore.set("donasiumat_demo_email", email, {
+      path: "/",
+      httpOnly: true,
+      maxAge: 60 * 60 * 24 * 7,
+      sameSite: "lax",
+    });
+  }
+  revalidatePath("/", "layout");
+  return { success: true };
+}
+
 export async function logoutAction() {
+  const cookieStore = await cookies();
+  cookieStore.delete("donasiumat_demo_role");
+  cookieStore.delete("donasiumat_demo_email");
+
   const supabase = await createClient();
   const {
     data: { user },

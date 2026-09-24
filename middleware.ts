@@ -41,6 +41,9 @@ export async function middleware(request: NextRequest) {
     data: { user },
   } = await supabase.auth.getUser();
 
+  const demoRole = request.cookies.get("donasiumat_demo_role")?.value;
+  const isAuthenticated = !!user || !!demoRole;
+
   const pathname = request.nextUrl.pathname;
 
   // Protect Dashboard routes
@@ -51,7 +54,7 @@ export async function middleware(request: NextRequest) {
     pathname.startsWith("/galang-dana/riwayat-pencairan");
   const isAdminRoute = pathname.startsWith("/admin");
 
-  if (!user && (isDashboardRoute || isFundraiserRoute || isAdminRoute)) {
+  if (!isAuthenticated && (isDashboardRoute || isFundraiserRoute || isAdminRoute)) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     url.searchParams.set("next", pathname);
