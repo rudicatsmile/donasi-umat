@@ -64,6 +64,47 @@ export async function updateProfileAction(formData: FormData) {
 }
 
 // Category Server Actions (Admin)
+export async function getCategoriesAction() {
+  try {
+    const adminClient = createAdminClient();
+    const { data: categories, error } = await adminClient
+      .from("categories")
+      .select("id, name, slug, icon_name, description, created_at")
+      .order("name", { ascending: true });
+
+    if (error) {
+      console.error("Error fetching categories:", error);
+      return { success: false, error: error.message, data: [] };
+    }
+
+    const { data: campaigns } = await adminClient
+      .from("campaigns")
+      .select("category_id");
+
+    const countMap: Record<string, number> = {};
+    if (campaigns) {
+      campaigns.forEach((c: any) => {
+        if (c.category_id) {
+          countMap[c.category_id] = (countMap[c.category_id] || 0) + 1;
+        }
+      });
+    }
+
+    const formatted = (categories || []).map((cat: any) => ({
+      id: cat.id,
+      name: cat.name,
+      slug: cat.slug,
+      iconName: cat.icon_name || "HeartPulse",
+      description: cat.description || "",
+      count: countMap[cat.id] || 0,
+    }));
+
+    return { success: true, data: formatted };
+  } catch (err: any) {
+    return { success: false, error: err.message, data: [] };
+  }
+}
+
 export async function createCategoryAction(formData: FormData) {
   const name = formData.get("name") as string;
   const slug = formData.get("slug") as string;
@@ -108,6 +149,52 @@ export async function createCategoryAction(formData: FormData) {
   revalidatePath("/kampanye");
   revalidatePath("/");
   return { success: true, message: "Kategori berhasil ditambahkan!" };
+}
+
+export async function updateCategoryAction(id: string, formData: FormData) {
+  const name = formData.get("name") as string;
+  const slug = formData.get("slug") as string;
+  const description = formData.get("description") as string;
+
+  if (!id || !name || !slug) {
+    return { error: "ID, nama, dan slug kategori wajib diisi" };
+  }
+
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  const adminClient = createAdminClient();
+  const { data, error } = await adminClient
+    .from("categories")
+    .update({
+      name,
+      slug,
+      description,
+    })
+    .eq("id", id)
+    .select()
+    .single();
+
+  if (error) {
+    return { error: error.message };
+  }
+
+  await logAudit({
+    actorId: user?.id || null,
+    actorRole: "admin",
+    action: "update",
+    entityType: "category" as any,
+    entityId: id,
+    description: `Admin memperbarui kategori: ${name}`,
+    afterData: data as any,
+  });
+
+  revalidatePath("/admin/kategori");
+  revalidatePath("/kampanye");
+  revalidatePath("/");
+  return { success: true, message: "Kategori berhasil diperbarui!" };
 }
 
 export async function deleteCategoryAction(id: string) {
