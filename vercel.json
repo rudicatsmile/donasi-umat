@@ -1,11 +1,7 @@
 {
   "crons": [
     {
-      "path": "/api/cron/expire-donations",
-      "schedule": "0 * * * *"
-    },
-    {
-      "path": "/api/cron/subuh-pledge",
+      "path": "/api/cron/daily-runner",
       "schedule": "30 21 * * *"
     }
   ]
